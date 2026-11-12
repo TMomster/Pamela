@@ -22,7 +22,7 @@ notify_done.ps1
 # 临时改名 / 诊断脚本（下划线前缀 = 一次性工具）
 /t-*.txt
 /t-*.mjs
-/tools/_*.mjs
+/tools/_*
 
 # 本机手动验收清单
 /test.md
