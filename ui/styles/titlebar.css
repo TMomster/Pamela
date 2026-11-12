@@ -1,0 +1,99 @@
+/* 自定义标题栏样式。 */
+/* Pamela — custom title bar. */
+
+.titlebar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--pamela-titlebar-height);
+  padding-left: 12px;
+  background: var(--pamela-black);
+  border-bottom: 1px solid var(--pamela-border);
+  /* The whole bar is a drag region; buttons opt out by being clickable
+     elements, which Tauri's drag script ignores. */
+  cursor: default;
+}
+
+.titlebar__brand {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.titlebar__title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--pamela-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.titlebar__controls {
+  display: flex;
+  align-self: stretch;
+  flex: 0 0 auto;
+}
+
+.caption-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--pamela-text);
+  cursor: default;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.caption-button svg {
+  width: 10px;
+  height: 10px;
+  overflow: visible;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1;
+  stroke-linecap: square;
+}
+
+.caption-button:hover {
+  background: var(--pamela-hover);
+}
+
+.caption-button:active {
+  background: var(--pamela-active);
+}
+
+.caption-button:focus-visible {
+  outline: 1px solid #4c8dff;
+  outline-offset: -2px;
+}
+
+.caption-button--close:hover {
+  background: var(--pamela-close-hover);
+  color: #ffffff;
+}
+
+.caption-button--close:active {
+  background: #b12619;
+  color: #ffffff;
+}
+
+/* Restore glyph is hidden until the window is maximised. */
+.icon-restore {
+  display: none;
+}
+
+.app.is-maximized .icon-maximize {
+  display: none;
+}
+
+.app.is-maximized .icon-restore {
+  display: inline;
+}

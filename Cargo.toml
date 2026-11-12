@@ -1,0 +1,39 @@
+[package]
+name = "pamela"
+version = "1.0.0"
+description = "Pamela — a visual-novel engine and authoring environment"
+authors = ["Momster"]
+edition = "2021"
+rust-version = "1.77"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/TMomster"
+default-run = "pamela"
+
+# The `*.pamela` script language and the IDE shell both live in this crate tree.
+include = ["src/**/*", "ui/**/*", "capabilities/**/*", "tauri.conf.json", "build.rs"]
+
+[lib]
+name = "pamela_lib"
+# Desktop only: `main.rs` links the library and the front-end is embedded in
+# the executable, so the static and dynamic library variants a mobile target
+# needs would only be compiled and thrown away.
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6", features = [] }
+
+[dependencies]
+tauri = { version = "2.11", features = [] }
+tauri-plugin-dialog = "2.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+fontdb = "0.23"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+# panic is deliberately left at the default (`unwind`). Aborting would turn
+# any startup failure, such as WebView2 being unavailable, into a silent
+# exit; unwinding prints a diagnostic the user can act on.
+strip = true

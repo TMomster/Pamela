@@ -1,0 +1,46 @@
+/* 状态栏样式。 */
+/* Pamela — status bar. */
+
+.statusbar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 16px;
+  height: var(--pamela-statusbar-height);
+  padding: 0 12px;
+  background: var(--pamela-surface);
+  border-top: 1px solid var(--pamela-border);
+  font-size: 11px;
+  color: var(--pamela-text-muted);
+  overflow: hidden;
+}
+
+.statusbar__item {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.statusbar__spacer {
+  flex: 1 1 auto;
+}
+
+.statusbar__item--message {
+  flex: 0 1 auto;
+  max-width: 60%;
+  color: var(--pamela-text);
+}
+
+/* The pointer's place in the frame, shown while it is over the frame. Monospace
+   digits so the reading does not shuffle the words beside it on every pixel of
+   travel; `hidden` does the rest, since the item has no display of its own. */
+.statusbar__item--pointer {
+  flex: 0 0 auto;
+  font-family: var(--pamela-editor-font);
+  font-variant-numeric: tabular-nums;
+  color: var(--pamela-text-muted);
+}
+
+.statusbar__item--message.is-error {
+  color: #ff6b5e;
+}

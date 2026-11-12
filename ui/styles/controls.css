@@ -1,0 +1,106 @@
+/* 应用自绘控件样式。 */
+/* Pamela — controls the app draws for itself. */
+
+/* --- dropdown ---
+   The closed half: a button reading the current option, sized by whatever it is
+   dropped into. Its list is `.select-popup`, which lives on `document.body`
+   because a node inside the map is scaled and clipped — a popup drawn inside it
+   would be clipped with it. */
+
+.select {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 3px 6px;
+  background-color: var(--pamela-surface);
+  border: 1px solid var(--pamela-border);
+  border-radius: 4px;
+  color: var(--pamela-text);
+  font: inherit;
+  font-size: inherit;
+  line-height: 1.3;
+  text-align: left;
+  cursor: default;
+}
+
+.select:hover {
+  background-color: var(--pamela-hover);
+}
+
+.select.is-open {
+  border-color: var(--pamela-accent);
+}
+
+.select__value {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.select__arrow {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  opacity: 0.65;
+}
+
+/* The open half: the list itself. */
+.select-popup {
+  position: fixed;
+  z-index: 950;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--pamela-surface);
+  border: 1px solid var(--pamela-border);
+  border-radius: 6px;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.6);
+  font-family: var(--pamela-font);
+  font-size: 12px;
+}
+
+.select-option {
+  display: block;
+  width: 100%;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--pamela-text);
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.select-option:hover,
+.select-option.is-active {
+  background: var(--pamela-hover);
+}
+
+.select-option.is-selected {
+  color: var(--pamela-accent);
+}
+
+/* --- editable dropdown ---
+   A text box that offers choices without taking them away: the file fields in
+   the node map accept a name that is not in the folder yet. Same chevron as the
+   dropdowns above, painted with gradients so it follows `currentColor`. */
+
+.combo {
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 13px) calc(50% + 1px),
+    calc(100% - 9px) calc(50% + 1px);
+  background-size: 4px 4px, 4px 4px;
+  background-repeat: no-repeat;
+  padding-right: 22px;
+}
+
+.combo.is-open {
+  border-color: var(--pamela-accent);
+}

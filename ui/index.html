@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Pamela</title>
+    <link rel="stylesheet" href="./styles/fonts.css" />
+    <link rel="stylesheet" href="./styles/app.css" />
+    <link rel="stylesheet" href="./styles/titlebar.css" />
+    <link rel="stylesheet" href="./styles/menubar.css" />
+    <link rel="stylesheet" href="./styles/panels.css" />
+    <link rel="stylesheet" href="./styles/reader.css" />
+    <link rel="stylesheet" href="./styles/graph.css" />
+    <link rel="stylesheet" href="./styles/modal.css" />
+    <link rel="stylesheet" href="./styles/export-panel.css" />
+    <link rel="stylesheet" href="./styles/statusbar.css" />
+    <link rel="stylesheet" href="./styles/controls.css" />
+  </head>
+
+  <body>
+    <div class="app">
+      <!-- Custom window chrome. Tauri's built-in drag script turns
+           `data-tauri-drag-region` into window move + double-click maximise. -->
+      <header class="titlebar" data-tauri-drag-region>
+        <div class="titlebar__brand">
+          <span class="titlebar__title">Pamela</span>
+        </div>
+
+        <!-- The player has no visible way back to the editor: Esc asks first
+             (see `ui/main.js`). The title bar therefore carries no exit button. -->
+        <div class="titlebar__controls">
+          <button
+            id="titlebar-minimize"
+            class="caption-button"
+            type="button"
+            title="最小化"
+            aria-label="最小化"
+          >
+            <svg viewBox="0 0 10 10" aria-hidden="true">
+              <path d="M0 5h10" />
+            </svg>
+          </button>
+
+          <button
+            id="titlebar-maximize"
+            class="caption-button"
+            type="button"
+            title="最大化"
+            aria-label="最大化"
+          >
+            <svg viewBox="0 0 10 10" aria-hidden="true">
+              <rect class="icon-maximize" x="0.5" y="0.5" width="9" height="9" rx="1" />
+              <g class="icon-restore">
+                <path d="M2.5 2.5V0.5h7v7h-2" />
+                <rect x="0.5" y="2.5" width="7" height="7" rx="1" />
+              </g>
+            </svg>
+          </button>
+
+          <button
+            id="titlebar-close"
+            class="caption-button caption-button--close"
+            type="button"
+            title="关闭"
+            aria-label="关闭"
+          >
+            <svg viewBox="0 0 10 10" aria-hidden="true">
+              <path d="M0.5 0.5l9 9M9.5 0.5l-9 9" />
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      <!-- Menu bar. Filled from the menu model in ui/menus.js. -->
+      <div id="menubar"></div>
+
+      <!-- Two-column workspace: resource tree on the left, editor on the right,
+           separated by a draggable splitter. -->
+      <div class="workspace">
+        <aside class="panel panel--resources" id="resource-panel" aria-label="资源">
+          <header class="panel__header">
+            <span class="panel__title" id="resource-title">资源</span>
+            <span class="panel__meta" id="resource-meta"></span>
+            <!-- Re-reads the project from disk and redraws the tree in place.
+                 A file added, renamed or deleted outside the editor is not
+                 noticed until something rescans, and the menu's 重新扫描 is a
+                 trip through two menus for a one-click habit. -->
+            <button
+              class="panel__button"
+              id="resource-refresh"
+              type="button"
+              title="刷新"
+              aria-label="刷新资源树"
+            >
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+                <path d="M21 3v6h-6" />
+              </svg>
+            </button>
+            <!-- Collapses the panel to a strip; the same button brings it
+                 back. Width itself stays on the splitter. -->
+            <button
+              class="panel__toggle"
+              id="resource-toggle"
+              type="button"
+              title="折叠资源栏"
+              aria-label="折叠资源栏"
+              aria-expanded="true"
+            >
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="m11 17-5-5 5-5M18 17l-5-5 5-5" />
+              </svg>
+            </button>
+          </header>
+
+          <div class="panel__body" id="resource-body">
+            <p class="panel__placeholder" id="resource-placeholder">
+              尚未打开项目。<br />使用「文件 → 新建项目…」或「打开项目…」。
+            </p>
+          </div>
+        </aside>
+
+        <div
+          class="splitter"
+          id="resource-splitter"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="调整资源栏宽度"
+          tabindex="0"
+        ></div>
+
+        <main class="editor" aria-label="编辑区">
+          <div class="tabs" id="editor-tabs" role="tablist"></div>
+
+          <div class="editor__surface">
+            <div class="editor__empty" id="editor-empty">
+              <p class="editor__empty-title">编辑区</p>
+              <p class="editor__empty-hint">从左侧资源栏打开一个 .pe 脚本</p>
+            </div>
+
+            <!-- Bound to the open script. Editing is enabled; saving is wired
+                 to 文件 → 保存. Line numbers live in a gutter that scrolls with
+                 the text. Both the gutter and the painted layer are a clipping
+                 box plus an inner block that is *translated* by the textarea's
+                 scroll offset: their own scroll ranges cannot be made to match
+                 the textarea's (it has scrollbars, and its value's trailing
+                 newline is one more line box), and a scroll that is clamped
+                 short leaves the text one line behind the numbers. -->
+            <div class="editor__code" id="editor-code" hidden>
+              <div class="editor__gutter" id="editor-gutter" aria-hidden="true"><span class="editor__gutter-inner" id="editor-gutter-inner"></span></div>
+
+              <div class="editor__pane" id="editor-pane">
+                <div class="editor__highlight" id="editor-highlight" aria-hidden="true"><pre class="editor__highlight-inner" id="editor-highlight-inner"></pre></div>
+
+                <div class="editor__find-overlay" id="editor-find-overlay" aria-hidden="true">
+                  <div class="editor__find-inner" id="editor-find-inner"></div>
+                </div>
+
+                <!-- Live syntax errors are underlined on their own line, in the
+                     same content coordinates as the find marks. -->
+                <div class="editor__error-overlay" id="editor-error-overlay" aria-hidden="true">
+                  <div class="editor__error-inner" id="editor-error-inner"></div>
+                </div>
+
+                <textarea
+                  id="editor-text"
+                  class="editor__text"
+                  spellcheck="false"
+                  wrap="off"
+                  aria-label="脚本内容"
+                ></textarea>
+
+                <div class="editor__findbar" id="editor-findbar" hidden>
+                  <input class="editor__find-input" id="editor-find-input" type="text" placeholder="查找" aria-label="查找" />
+                  <label class="editor__find-flag"><input type="checkbox" id="editor-find-case" /> 区分大小写</label>
+                  <label class="editor__find-flag"><input type="checkbox" id="editor-find-regex" /> 正则</label>
+                  <span class="editor__find-info" id="editor-find-info"></span>
+                  <button type="button" class="editor__find-btn" id="editor-find-prev" title="上一个" aria-label="上一个">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m18 15-6-6-6 6" /></svg>
+                  </button>
+                  <button type="button" class="editor__find-btn" id="editor-find-next" title="下一个" aria-label="下一个">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m6 9 6 6 6-6" /></svg>
+                  </button>
+                  <input class="editor__find-input editor__find-input--replace" id="editor-find-replace" type="text" placeholder="替换为" aria-label="替换为" />
+                  <button type="button" class="editor__find-btn" id="editor-find-replace-one" title="替换当前">替换</button>
+                  <button type="button" class="editor__find-btn" id="editor-find-replace-all" title="替换全部">全部</button>
+                  <button type="button" class="editor__find-btn" id="editor-find-close" title="关闭" aria-label="关闭">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M18 6 6 18M6 6l12 12" /></svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- The stage a script draws on. Opened by 演出 → 运行当前脚本
+                 (Ctrl+Enter); only one stage exists at a time. -->
+            <div class="stage" id="stage-view" hidden>
+              <div class="stage__frame">
+                <div class="stage__surface" id="stage-surface"></div>
+
+                <!-- The backlog: the lines already performed this run, over a
+                     scrim that dims the scene rather than a card that covers
+                     it. The player reads it the way they read the dialogue
+                     box — plain text on the picture — and it is opened by
+                     scrolling up on the stage, by the 回看 word, or by the
+                     menu item. -->
+                <div class="backlog" id="backlog" hidden>
+                  <div class="backlog__head">
+                    <span class="backlog__title">回看</span>
+                    <span class="backlog__hint">滚轮或 Esc 关闭</span>
+                    <button
+                      type="button"
+                      id="backlog-close"
+                      class="backlog__close"
+                      title="关闭（Esc）"
+                      aria-label="关闭"
+                    >
+                      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M18 6 6 18M6 6l12 12" /></svg>
+                    </button>
+                  </div>
+                  <div class="backlog__body" id="backlog-body"></div>
+                </div>
+
+                <!-- The save/load slot panel: one at a time, over the scene.
+                     Built by `ui/slots.js`; `#slots-panel` stays empty until a
+                     save or a load is asked for. -->
+                <div class="slots" id="slots-panel" hidden></div>
+
+                <!-- 设置, likewise a layer on the scene rather than a window-wide
+                     dialog: it changes how the performance is read, so it is
+                     reached from the stage's own menu. Built by
+                     `ui/stage-settings.js`; empty while closed. -->
+                <div class="stage-settings" id="stage-settings-panel" hidden></div>
+
+                <!-- 退出确认: Esc on the stage asks before the scene goes away.
+                     It has to live inside the frame because 全屏 and 播放器模式
+                     hide the tabs and the menu bar — there is no × to click and
+                     the picture is the whole interface. Built by
+                     `ui/stage-exit.js`; Enter confirms, Esc goes back. -->
+                <div class="stage-exit" id="stage-exit" hidden></div>
+
+                <!-- The motion path editor, over the scene the path belongs to.
+                     Built by `ui/path-editor.js`; empty until a path file is
+                     opened from the resource tree. -->
+                <div class="path-editor-host" id="path-editor-host"></div>
+
+                <!-- The player's text menu, a line of bare words in the picture's
+                     own bottom-right corner, the way a visual novel puts it: no
+                     tray, no pill, no border, no background. The item that is on
+                     is marked by stroking its own glyphs — never by a box around
+                     it.
+
+                     It is a child of the 16:9 frame, not a sibling of it: the
+                     menu belongs to the picture, so it has to sit on the picture
+                     — the same corner, the same size, whether the stage is a
+                     tab in the editor or the whole screen. It stays hidden until
+                     the pointer goes to that corner (`ui/stage-menu.js`). Every
+                     action here is mirrored by a menu item. -->
+                <div class="stage__menu" id="stage-menu" role="toolbar" aria-label="演出菜单">
+                  <button
+                    type="button"
+                    id="stage-save"
+                    class="stage__menu-item"
+                    title="存档"
+                  >存档</button>
+                  <button
+                    type="button"
+                    id="stage-load"
+                    class="stage__menu-item"
+                    title="读档"
+                  >读档</button>
+                  <button
+                    type="button"
+                    id="stage-auto"
+                    class="stage__menu-item"
+                    title="自动播放"
+                  >自动</button>
+                  <button
+                    type="button"
+                    id="stage-skip"
+                    class="stage__menu-item"
+                    title="快进"
+                  >快进</button>
+                  <button
+                    type="button"
+                    id="stage-fullscreen"
+                    class="stage__menu-item"
+                    title="全屏"
+                  >全屏</button>
+                  <button
+                    type="button"
+                    id="stage-backlog"
+                    class="stage__menu-item"
+                    title="回看"
+                  >回看</button>
+                  <button
+                    type="button"
+                    id="stage-settings"
+                    class="stage__menu-item"
+                    title="设置"
+                  >设置</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- The dialogue designer, image/audio editors and the node canvas
+                 are created per open tab by `syncEditors()` (see
+                 docs/2026-11-04-multi-tabs.md). They reuse the same CSS classes,
+                 so no inert, permanently hidden placeholders live here. -->
+
+            <!-- The image viewer. Opened by clicking an image in the resource
+                 tree; the backend inlines it as a data URL, since the webview
+                 cannot load a filesystem path under the app's CSP. -->
+            <div class="image-view" id="image-view" hidden>
+              <div class="image-view__frame">
+                <img class="image-view__image" id="image-image" alt="" />
+              </div>
+              <p class="image-view__meta" id="image-meta"></p>
+            </div>
+
+            <!-- The built-in reader: 帮助 and 关于 both open it. Read-only by
+                 construction — the article is rendered from strings compiled
+                 into the application, and nothing here is editable. Built by
+                 `ui/reader.js`. -->
+            <div class="reader" id="reader-view" tabindex="0" hidden></div>
+          </div>
+        </main>
+      </div>
+
+      <!-- Status bar: project state on the left, transient messages on the right. -->
+      <footer class="statusbar">
+        <span class="statusbar__item" id="status-project">未打开项目</span>
+        <span class="statusbar__item" id="status-file"></span>
+        <span class="statusbar__spacer"></span>
+        <span class="statusbar__item statusbar__item--pointer" id="status-pointer" hidden></span>
+        <span class="statusbar__item statusbar__item--message" id="status-message"></span>
+      </footer>
+
+      <!-- 应用内错误气泡：右下角红色圆角常驻通知，错误出现时弹出，需手动关闭。 -->
+      <div class="error-bubbles" id="error-bubbles" aria-live="polite"></div>
+
+      <!-- 播放器模式的开始画面：覆盖整个窗口的黑屏，左键或空格才开始演出。
+           放在 .app 末尾而不是舞台里，因为演出还没开始，舞台尚未显示。 -->
+      <div id="player-start"></div>
+    </div>
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

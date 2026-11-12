@@ -1,0 +1,20 @@
+{
+  "name": "pamela",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pamela visual-novel editor (development tooling only; the app itself ships with no runtime dependency)",
+  "author": {
+    "name": "Momster",
+    "url": "https://github.com/TMomster"
+  },
+  "homepage": "https://github.com/TMomster",
+  "license": "MIT OR Apache-2.0",
+  "scripts": {
+    "test": "node --test \"ui/tests/*.test.js\"",
+    "check:js": "tsc -p tsconfig.json",
+    "smoke:ui": "node tools/smoke-ui.mjs"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}

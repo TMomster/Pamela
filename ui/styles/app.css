@@ -1,0 +1,406 @@
+/* 应用外壳样式。 */
+/* Pamela — application shell. */
+
+:root {
+  --pamela-black: #000000;
+  --pamela-surface: #0a0a0a;
+  --pamela-titlebar-height: 34px;
+  --pamela-menubar-height: 30px;
+  --pamela-panel-header-height: 30px;
+  --pamela-tab-height: 32px;
+  --pamela-statusbar-height: 24px;
+
+  /* Overwritten by the splitter; the initial value matches the markup. */
+  --pamela-resource-width: 240px;
+
+  --pamela-text: #e6e6e6;
+  --pamela-text-muted: #9a9a9a;
+  --pamela-text-faint: #5f5f5f;
+
+  --pamela-border: #1f1f1f;
+  --pamela-hover: rgba(255, 255, 255, 0.07);
+  --pamela-active: rgba(255, 255, 255, 0.04);
+  --pamela-selection: rgba(76, 141, 255, 0.18);
+  --pamela-accent: #4c8dff;
+  --pamela-close-hover: #c42b1c;
+
+  /* Unsaved changes: the tab's top marker and the tree row both use these. */
+  --pamela-dirty: #e5533d;
+  --pamela-dirty-soft: rgba(229, 83, 61, 0.16);
+
+  --pamela-scrollbar-thumb: #2b2b2b;
+  --pamela-scrollbar-thumb-hover: #3f3f3f;
+
+  /* The window's own text: 思源黑体, bundled (see `fonts.css`). Its Latin is the
+     humanist sans that comes with the family, which is the right reading face
+     for menus and prose. The rest of the stack only matters if the bundled face
+     fails to load. */
+  --pamela-font: "Source Han Sans CN", "Microsoft YaHei UI", system-ui,
+    sans-serif;
+
+  /* The script editor's text, deliberately not the UI's face: Latin in JetBrains
+     Mono, so columns of code line up, and Chinese in 思源黑体, which draws `“`
+     and `”` far enough apart to tell which is which — the tokeniser closes a
+     Chinese string on its own mark, so the writer has to see it.
+
+     The first family is the punctuation-only copy of 思源黑体 and has to stay
+     first: JetBrains Mono has `“` `”` `、` too, and left to the normal fallback
+     order it would draw them in its own Latin design.
+
+     Mixed script means a column is not a fixed number of pixels (a 汉字 is
+     13 px wide at 13 px, a Latin letter 7.8 px), so everything that positions
+     itself against the text — find marks, the error underline, the box a
+     dropped file snaps to — measures the glyphs instead of counting
+     characters. See `editorRangeRect` in `ui/main.js`. */
+  --pamela-editor-font: "Source Han Sans CN Punct", "JetBrains Mono",
+    "Source Han Sans CN", "Microsoft YaHei UI", system-ui, sans-serif;
+
+  /* A Text object's default: Western letters in JetBrains Mono, Chinese in
+     思源黑体. Stage text writes its own inline stack (see `textFontStack` in
+     `ui/text-font.js`); this is the value before the first draw and the one a
+     script never touches. */
+  --pamela-text-font: "JetBrains Mono", "Source Han Sans CN", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* The `hidden` attribute must win over component `display` rules (the empty
+   editor placeholder and the textarea both set `display` explicitly). Without
+   this, toggling `hidden` in the script leaves both elements in the flow and
+   the placeholder lingers above the textarea. */
+[hidden] {
+  display: none !important;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+}
+
+body {
+  color: var(--pamela-text);
+  font-family: var(--pamela-font);
+  font-size: 13px;
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+  /* The chrome is an application frame, not a document. */
+  user-select: none;
+  cursor: default;
+}
+
+/* --- icons ---
+   Every glyph built by `ui/icons.js` is a 24-unit stroke drawing. Size and
+   stroke are set once, here: a button names the icon and the rest follows —
+   colour comes from `currentColor`, so hover, active and disabled states
+   light the glyph without a rule of their own. */
+.icon {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Held for the duration of a splitter drag so the cursor and text selection do
+   not flicker as the pointer crosses the panels. */
+body.is-resizing {
+  cursor: col-resize;
+}
+
+body.is-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+/* The rounded frame exists only while the window is restored; a maximised
+   window must sit flush against the screen edges. */
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: var(--pamela-black);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.app.is-maximized {
+  border-color: transparent;
+  border-radius: 0;
+}
+
+/* --- stage fullscreen ---
+   The window itself goes fullscreen — that is what covers the taskbar — and
+   this class is what makes it a *stage* fullscreen rather than the whole editor
+   stretched across the monitor: the shell around the scene is hidden, leaving
+   the picture alone on the screen.
+
+   `display: none` rather than `visibility: hidden`, so the flex column re-flows
+   and the stage really does get the whole window instead of a large-but-wrong
+   area with the shell's space still reserved. */
+.app.is-stage-fullscreen {
+  border-color: transparent;
+  border-radius: 0;
+}
+
+.app.is-stage-fullscreen .titlebar,
+.app.is-stage-fullscreen #menubar,
+.app.is-stage-fullscreen .statusbar,
+.app.is-stage-fullscreen .panel--resources,
+.app.is-stage-fullscreen .splitter,
+.app.is-stage-fullscreen .tabs {
+  display: none;
+}
+
+/* The scene fills the screen edge to edge: the stage's own padding exists to
+   keep the picture off the window's frame, and there is no frame left. */
+.app.is-stage-fullscreen .stage {
+  padding: 0;
+}
+
+/* The stage's text menu needs no rule of its own in fullscreen: it lives inside
+   the picture (`.stage__menu` in `ui/styles/panels.css`), and its size follows
+   the picture's width, so the editor and the fullscreen show the same words in
+   the same corner at the same share of the picture. A rule here would only be a
+   second place for the two modes to drift apart. */
+
+/* Player mode hides every editing surface — the menu bar, the resource tree, the
+   code and dialogue editors and their tabs and status — leaving only the stage
+   and its text menu. The author's sources stay on disk; the player simply cannot
+   see or touch them. `display: none` re-flows the flex layout so the stage takes
+   the whole window rather than sitting beside reserved shell space. Esc is the
+   only way back, and it asks before leaving. */
+.app.is-player-mode #menubar,
+.app.is-player-mode .panel--resources,
+.app.is-player-mode .splitter,
+.app.is-player-mode .tabs,
+.app.is-player-mode .editor__code,
+.app.is-player-mode .dialog-view,
+.app.is-player-mode .image-view,
+.app.is-player-mode .reader,
+.app.is-player-mode .statusbar {
+  display: none;
+}
+
+/* With the editors gone, the stage fills the editor surface edge to edge. */
+.app.is-player-mode .stage {
+  padding: 0;
+}
+
+/* --- scrollbars ---
+   Every scrolling surface shares one look: the resource panel, the editor, the
+   dialogue designer's panes and the suggestion popup all draw the same thumb.
+
+   The webview is Chromium-based, so the custom look comes from the
+   ::-webkit-scrollbar pseudo-elements. They are left unqualified rather than
+   listed surface by surface, so an element that starts scrolling later is
+   already styled. The standard `scrollbar-width`/`scrollbar-color` properties
+   are deliberately left unset: once either is given a value other than `auto`,
+   Chromium ignores the pseudo-elements and the styling below would never paint.
+
+   The thumb is transparent-bordered so it appears to float on whatever surface
+   it belongs to, rather than sitting in a track. The tab strip hides its own
+   bar through a class rule, which still wins over these. */
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 6px;
+  background-color: var(--pamela-scrollbar-thumb);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--pamela-scrollbar-thumb-hover);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* --- form controls ---
+   The webview draws its own spinner, dropdown arrow and focus ring, and none of
+   them belong to this app. A number box keeps its keys and its wheel, and a
+   select keeps its list, but the chrome around both is drawn here: the arrows
+   the key frame and timing fields use are Pamela's own (`.path-editor__stepper`
+   in panels.css), and the dropdown arrow is the same chevron corner the icon
+   set draws, painted with two gradients so it follows `currentColor`. */
+
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+select {
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 12px) calc(50% + 1px), calc(100% - 8px) calc(50% + 1px);
+  background-size: 4px 4px, 4px 4px;
+  background-repeat: no-repeat;
+  padding-right: 22px;
+}
+
+/* The list itself is the platform's popup, which cannot be styled from here;
+   what it inherits is the palette, so it at least opens dark. */
+select option {
+  background: var(--pamela-surface);
+  color: var(--pamela-text);
+}
+
+/* --- focus ---
+   The chrome is an application frame, not a document: the browser's own focus
+   ring is suppressed everywhere. The few controls that must be told apart
+   while the keyboard moves through them draw their own indicator, and their
+   class selectors win over this one (see `titlebar.css`, `menubar.css` and the
+   tree row in `panels.css`). */
+
+:focus-visible {
+  outline: none;
+}
+
+/* --- error bubble ---
+   应用内错误通知：固定在右下角的红色圆角矩形，错误出现时弹出，常驻不自动消失，
+   需手动关闭，可堆叠多条。不阻断任何操作（非模态）。 */
+.error-bubbles {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 10px;
+  z-index: 1000;
+  max-width: min(380px, calc(100vw - 32px));
+  pointer-events: none;
+}
+
+/* 绿色提示气泡：进入播放器模式时说明 Esc 的用途，短暂显示后自行消失。 */
+.error-bubble.error-bubble--success {
+  background: #2e9e5b;
+}
+
+.error-bubble {
+  position: relative;
+  pointer-events: auto;
+  background: #c0392b;
+  color: #fff;
+  border-radius: 10px;
+  padding: 12px 38px 12px 14px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  font-size: 13px;
+  line-height: 1.5;
+  /* 通知从右边划进来：起手在屏幕右缘之外，落到位。 */
+  animation: pamela-bubble-in 200ms cubic-bezier(0.22, 0.68, 0.24, 1);
+}
+
+/* 收尾的那一下：向右划走，划完才把节点摘掉（`ui/error-notify.js`）。
+   `forwards` 是必要的：动画结束后元素要留在画外，而不是弹回原处。 */
+.error-bubble.is-closing {
+  animation: pamela-bubble-out 180ms ease-in forwards;
+  pointer-events: none;
+}
+
+@keyframes pamela-bubble-in {
+  from {
+    transform: translateX(calc(100% + 16px));
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes pamela-bubble-out {
+  from {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateX(calc(100% + 16px));
+    opacity: 0;
+  }
+}
+
+.error-bubble__title {
+  margin: 0 0 4px;
+  font-weight: 600;
+}
+
+.error-bubble__body {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.error-bubble__actions {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+}
+
+.error-bubble__button {
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+  border: 0;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.error-bubble__button:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.error-bubble__close {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #fff;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.error-bubble__close:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+/* 编辑器里高亮运行期出错行：整行红色背景 + 左侧条，随滚动整体平移。 */
+.editor__run-error {
+  position: absolute;
+  background: rgba(224, 108, 117, 0.22);
+  border-left: 3px solid #e06975;
+  border-radius: 2px;
+  pointer-events: none;
+}

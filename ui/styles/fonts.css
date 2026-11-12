@@ -1,0 +1,51 @@
+/* 窗口使用的两套字体。 */
+/* Pamela — the two faces the window is set in. */
+/* 仓库保留字体副本以保证离线构建嵌入正确字形。 */
+
+/* 思源黑体 — the window's own text, and the Chinese half of the editor's.
+   It is also the face that draws `“` and `”`: the two most easily confused
+   characters a Chinese script contains. The language matches them as a pair,
+   the way brackets are matched (see `QUOTE_CLOSERS` in `ui/pamela.js`), so the
+   writer has to be able to see which one is on screen. */
+@font-face {
+  font-family: "Source Han Sans CN";
+  src: url("../fonts/SourceHanSansCN-Normal.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* The same file, declared a second time for a narrower job.
+   The editor sets Latin in a monospace face, and a monospace face also has
+   glyphs for `“` `”` `、` `。` — so plain "first family wins" would draw the
+   Chinese quotes in the Latin design, which is the main condition this whole
+   arrangement is meant to avoid. Restricting this copy to the Chinese
+   punctuation code points and putting it first in the editor's stack lets the
+   quotes and full-width marks come from 思源黑体 while ASCII stays monospace. */
+@font-face {
+  font-family: "Source Han Sans CN Punct";
+  src: url("../fonts/SourceHanSansCN-Normal.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+2014, U+2018-201F, U+2026, U+3000-303F, U+FF01-FF60, U+FFE0-FFE6;
+}
+
+/* JetBrains Mono — the Latin half of the editor's text. Two real faces rather
+   than one synthesised bold: keywords are set at 600, which the browser answers
+   with the 700 file. */
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("../fonts/JetBrainsMono-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("../fonts/JetBrainsMono-Bold.ttf") format("truetype");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}

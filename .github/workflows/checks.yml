@@ -1,0 +1,92 @@
+# The six automated sections the author's local check script runs, reproduced here
+# because that script ends with an interactive `pause`, which would hang a runner.
+# The script itself is machine-specific and is not part of the repository.
+#
+# The four `tools/smoke-*.mjs` browser checks are deliberately not here. They
+# need a real Edge install, fixed local ports and a headless profile; run them
+# locally (or in a dedicated manual job) as
+# `docs/2026-11-08.md` §3.4 describes.
+# Keeping them out means a failed push is always a real code break.
+
+name: checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  checks:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # 1/6 — JavaScript syntax, twice: once as the browser loads it, once as
+      # a module so a stray `await` in a non-async function is still caught.
+      - name: JS syntax (script and module)
+        shell: pwsh
+        run: |
+          $bad = 0
+          Get-ChildItem ui/*.js, ui/tests/*.js | ForEach-Object {
+            node --check $_.FullName 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { $bad++ }
+          }
+          $tmp = Join-Path $env:TEMP 'pamela-esm-check'
+          New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+          Get-ChildItem ui/*.js | ForEach-Object {
+            $copy = Join-Path $tmp ($_.BaseName + '.mjs')
+            Copy-Item $_.FullName $copy -Force
+            node --check $copy 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { $bad++ }
+          }
+          if ($bad -ne 0) { throw "$bad JavaScript files failed the syntax check" }
+
+      # 2/6 .. 5/6 — no `--offline`: a fresh runner has no Cargo cache.
+      - name: Frontend tests
+        shell: pwsh
+        run: node --test "ui/tests/*.test.js"
+
+      - name: Backend tests
+        run: cargo test
+
+      - name: Rust formatting
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      # 6/6 — the type check. TypeScript is a development dependency only: it
+      # reads the sources and emits nothing, so the shipped app keeps its "no
+      # runtime dependency, no bundler" shape. `npm ci` needs package-lock.json.
+      - name: Install JS dev dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Static types (checkJs)
+        run: npx --no-install tsc -p tsconfig.json
+
+  # 真浏览器冒烟：需要 Edge 与本地端口，先只接两个最稳的脚本。`continue-on-error`
+  # 是有意的过渡态——让接线层的失败在流水线里可见，而不是先让整条变红；
+  # 稳定后再去掉它（见 docs/2026-11-06.md R6；原引用的分册已合并）。
+  smoke:
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Smoke — editor shell
+        run: node tools/smoke-ui.mjs
+
+      - name: Smoke — key frames tab
+        run: node tools/smoke-keyframes-tab.mjs

@@ -1,0 +1,46 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Pamela",
+  "version": "1.0.0",
+  "identifier": "com.pamela.engine",
+  "build": {
+    "frontendDist": "./ui"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Pamela",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 880,
+        "minHeight": 560,
+        "center": true,
+        "decorations": false,
+        "transparent": true,
+        "shadow": true,
+        "resizable": true,
+        "maximizable": true,
+        "minimizable": true,
+        "closable": true,
+        "focus": true,
+        "visible": true,
+        "theme": "Dark",
+        "backgroundColor": "#000000",
+        "dragDropEnabled": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data:; media-src 'self' data:; style-src 'self' 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "active": false,
+    "targets": "all",
+    "publisher": "Momster",
+    "homepage": "https://github.com/TMomster",
+    "copyright": "Copyright (c) 2026 Momster. Licensed under MIT OR Apache-2.0.",
+    "icon": ["icons/flower_icon.ico"]
+  }
+}

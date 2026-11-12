@@ -1,0 +1,3504 @@
+/* 工作区面板：资源树、分隔条与编辑器。 */
+/* Pamela — workspace panels: resource tree, splitter, editor. */
+/* 装饰元素不得捕获点击事件。 */
+
+.workspace {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--pamela-black);
+}
+
+/* --- resource panel --- */
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  width: var(--pamela-resource-width, 240px);
+  flex: 0 0 auto;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--pamela-surface);
+}
+
+.panel__header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: var(--pamela-panel-header-height);
+  padding: 0 12px;
+  border-bottom: 1px solid var(--pamela-border);
+}
+
+.panel__meta {
+  font-size: 11px;
+  color: var(--pamela-text-faint);
+  white-space: nowrap;
+  /* Takes the slack so the collapse button stays pinned right, whatever the
+     header happens to be reporting. */
+  margin-left: auto;
+}
+
+.panel__placeholder {
+  margin: 0;
+  padding: 12px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--pamela-text-faint);
+}
+
+.panel__title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--pamela-text-muted);
+}
+
+.panel__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 6px 0;
+}
+
+/* --- collapsing the resource panel --- */
+
+/* 收起是一段动画：面板从当前宽度收成一条窄条，再倒回来。宽度有过渡，所以分隔条
+   拖动时必须把它关掉——面板不能慢半拍地跟着指针走。 */
+.panel--resources {
+  transition: width 200ms cubic-bezier(0.22, 0.68, 0.24, 1);
+}
+
+/* 正在拖分隔条：宽度直接跟着指针，不做过渡。 */
+body.is-resizing .panel--resources {
+  transition: none;
+}
+
+/* Collapsed, the panel narrows to a strip rather than to nothing: the button
+   that folded it has to stay reachable to unfold it. The width comes from the
+   class, so the splitter's figure is still there the moment it comes back. */
+.panel--resources.is-collapsed {
+  width: 34px;
+}
+
+.panel--resources.is-collapsed .panel__header {
+  justify-content: center;
+  padding: 0;
+}
+
+.panel--resources.is-collapsed .panel__title,
+.panel--resources.is-collapsed .panel__meta {
+  display: none;
+}
+
+/* The tree dissolves instead of blinking out: it fades while the panel narrows,
+   and fades back in while it widens. `visibility` is what finally takes it out
+   of the way — hidden elements keep their box, so the panel's layout never
+   jumps — and it waits for the fade to finish before it does.
+
+   The title and the count are gone with `display: none` instead: they sit in
+   the header next to the fold button, and a hidden-but-present box would push
+   that button out of the 34px strip. */
+.panel--resources .panel__body {
+  opacity: 1;
+  transition: opacity 140ms ease, visibility 0s linear 0s;
+}
+
+.panel--resources.is-collapsed .panel__body {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 140ms ease, visibility 0s linear 140ms;
+}
+
+.panel__toggle {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--pamela-text-muted);
+  font: inherit;
+  line-height: 1;
+  cursor: default;
+}
+
+.panel__toggle .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.panel__toggle:hover {
+  background: var(--pamela-hover);
+  color: var(--pamela-text);
+}
+
+/* A header button that acts on the panel's contents rather than on the panel
+   itself. Same footprint as the collapse button so the two read as one row of
+   controls, but it is not the thing that folds the panel away. */
+.panel__button {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--pamela-text-muted);
+  font: inherit;
+  line-height: 1;
+  cursor: default;
+}
+
+.panel__button .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.panel__button:hover {
+  background: var(--pamela-hover);
+  color: var(--pamela-text);
+}
+
+.panel__button:active {
+  background: var(--pamela-active);
+}
+
+/* A refresh in flight: the glyph turns while the rescan runs, which is the only
+   sign that a button press did anything when the tree itself does not change. */
+.panel__button.is-busy .icon {
+  animation: panel-spin 700ms linear infinite;
+}
+
+@keyframes panel-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Collapsed, the panel is a strip: the refresh button goes with the title,
+   because there is no tree to refresh in a strip and no room for a third
+   control. */
+.panel--resources.is-collapsed .panel__button {
+  display: none;
+}
+
+/* The picture a pointer rests on in the tree: a floating plate beside the row,
+   never in the flow, so it cannot push the tree around as it comes and goes. */
+.tree-preview {
+  position: fixed;
+  z-index: 900;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 280px;
+  padding: 6px;
+  background: var(--pamela-surface);
+  border: 1px solid var(--pamela-border);
+  border-radius: 6px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+}
+
+/* Bounded on both axes: a wide backdrop must not run off the screen, and a tall
+   one must not either. */
+.tree-preview__image {
+  display: block;
+  max-width: 268px;
+  max-height: 200px;
+  object-fit: contain;
+  border-radius: 3px;
+  background: #000;
+}
+
+.tree-preview__caption {
+  font-size: 11px;
+  color: var(--pamela-text-muted);
+  word-break: break-all;
+}
+
+/* --- resource tree --- */
+
+.tree {
+  font-size: 13px;
+  color: var(--pamela-text);
+}
+
+.tree__group {
+  display: block;
+}
+
+/* A collapsed folder hides its children without removing them from the DOM. */
+.tree__row[aria-expanded="false"] + .tree__group {
+  display: none;
+}
+
+.tree__row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding-right: 8px;
+  /* Depth is driven from the markup via --depth rather than nesting rules. */
+  padding-left: calc(8px + var(--depth, 0) * 14px);
+  white-space: nowrap;
+  cursor: default;
+}
+
+.tree__row:hover {
+  background: var(--pamela-hover);
+}
+
+/* A file row is focusable, and the browser's default ring is gone
+   application-wide, so the row carries the indicator itself while the keyboard
+   walks the tree. */
+.tree__row:focus-visible {
+  background: var(--pamela-selection);
+}
+
+.tree__row.is-selected {
+  background: var(--pamela-selection);
+}
+
+/* The tree row for the file with unsaved changes, tinted to match its tab. */
+.tree__row.is-dirty {
+  background: var(--pamela-dirty-soft);
+}
+
+.tree__row.is-dirty .tree__label {
+  color: var(--pamela-dirty);
+}
+
+/* Twisty: a small chevron for folders, blank for files. */
+.tree__twisty {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  position: relative;
+}
+
+.tree__row--dir .tree__twisty::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 0;
+  height: 0;
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  border-left: 5px solid var(--pamela-text-muted);
+  transform-origin: 40% 50%;
+  transition: transform 120ms ease;
+}
+
+.tree__row--dir[aria-expanded="true"] .tree__twisty::before {
+  transform: rotate(90deg);
+}
+
+.tree__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tree__row--file .tree__label {
+  color: var(--pamela-text);
+}
+
+/* --- splitter --- */
+
+.splitter {
+  flex: 0 0 auto;
+  width: 5px;
+  margin-left: -2px;
+  margin-right: -2px;
+  position: relative;
+  z-index: 1;
+  background: transparent;
+  cursor: col-resize;
+}
+
+.splitter::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 1px;
+  background: var(--pamela-border);
+  transition: background-color 120ms ease, width 120ms ease;
+}
+
+.splitter:hover::before,
+.splitter:focus-visible::before,
+.splitter.is-dragging::before {
+  left: 1px;
+  width: 3px;
+  background: var(--pamela-accent);
+}
+
+.splitter:focus-visible {
+  outline: none;
+}
+
+/* --- editor --- */
+
+.editor {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--pamela-black);
+}
+
+.tabs {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: stretch;
+  height: var(--pamela-tab-height);
+  border-bottom: 1px solid var(--pamela-border);
+  background: var(--pamela-black);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  max-width: 220px;
+  padding: 0 10px;
+  border-right: 1px solid var(--pamela-border);
+  font-size: 13px;
+  color: var(--pamela-text-muted);
+  cursor: default;
+}
+
+.tab:hover {
+  background: var(--pamela-hover);
+}
+
+.tab--active {
+  position: relative;
+  color: var(--pamela-text);
+  background: var(--pamela-surface);
+}
+
+/* Active tab marker on the top edge, so it reads as connected to the surface. */
+.tab--active::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--pamela-accent);
+}
+
+/* The open script has unsaved changes: the same top marker, in red. Declared
+   after `.tab--active` so it wins for a tab that is both active and dirty. */
+.tab--dirty::before {
+  background: var(--pamela-dirty);
+}
+
+.tab__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A key frame file has its own tab, and its label is a file name rather than a
+   scene: a small mark in front says which editor it opens, the way the stage
+   tab is marked as a scene. */
+.tab--keyframes .tab__label::before {
+  content: "◆ ";
+  color: var(--pamela-accent);
+  font-size: 10px;
+}
+
+.tab__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  cursor: default;
+}
+
+.tab__close svg {
+  width: 8px;
+  height: 8px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.2;
+  stroke-linecap: round;
+}
+
+.tab__close:hover {
+  background: var(--pamela-hover);
+  color: var(--pamela-text);
+}
+
+.editor__surface {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.editor__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 100%;
+  text-align: center;
+}
+
+.editor__empty-title {
+  margin: 0;
+  font-size: 14px;
+  color: var(--pamela-text-muted);
+}
+
+.editor__empty-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--pamela-text-faint);
+}
+
+/* Editor body: a fixed line-number gutter beside the text. The numbers live in
+   an inner block that is translated from the textarea's scroll offset (see
+   `syncGutterScroll`): the gutter itself is only a clipping box, so the numbers
+   cannot be clamped short the way its own scroll range would be. */
+.editor__code {
+  position: relative;
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  background: var(--pamela-black);
+}
+
+.editor__gutter {
+  flex: 0 0 auto;
+  min-width: 2.5em;
+  padding: 12px 10px;
+  overflow: hidden;
+  border-right: 1px solid var(--pamela-border);
+  color: var(--pamela-text-faint);
+  font-family: var(--pamela-editor-font);
+  font-size: 13px;
+  line-height: 1.6;
+  text-align: right;
+  white-space: pre;
+  user-select: none;
+  cursor: default;
+}
+
+.editor__gutter-inner {
+  display: block;
+  white-space: pre;
+}
+
+/* The editor body is a pane holding two stacked layers: a `<pre>` that paints
+   the highlighted copy of the text, and the textarea on top of it. The textarea
+   is transparent so the colour shows through, but keeps a visible caret. Both
+   layers share font, size, line-height, padding and tab size so the painted text
+   lines up with what the user types. The gutter must keep those metrics too so
+   its line numbers stay aligned.
+
+   The `<pre>` is likewise a clipping box around an inner block that is
+   translated by the textarea's scroll offset (`syncHighlightScroll`). Syncing by
+   scroll offset instead — setting this layer's own `scrollTop` — cannot work:
+   the textarea's scrollable range is not this layer's (it has scrollbars, and a
+   value ending in a newline gives it one more line box), so a scroll to the
+   bottom clamps here first and the painted text falls a line behind. */
+.editor__pane {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+}
+
+.editor__highlight {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  user-select: none;
+  z-index: 1;
+}
+
+.editor__highlight-inner {
+  margin: 0;
+  padding: 12px 14px;
+  border: 0;
+  font-family: var(--pamela-editor-font);
+  font-size: 13px;
+  line-height: 1.6;
+  tab-size: 4;
+  white-space: pre;
+  color: var(--pamela-text);
+}
+
+.editor__text {
+  position: absolute;
+  inset: 0;
+  flex: none;
+  min-width: 0;
+  margin: 0;
+  padding: 12px 14px;
+  border: 0;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--pamela-text);
+  font-family: var(--pamela-editor-font);
+  font-size: 13px;
+  line-height: 1.6;
+  tab-size: 4;
+  white-space: pre;
+  overflow: auto;
+  user-select: text;
+  cursor: text;
+  z-index: 3;
+}
+
+/* Token colours for the syntax-highlight layer. Kept close to the editor's own
+   palette so the highlight reads as part of the same surface. */
+.tok-comment { color: #6a737d; font-style: italic; }
+.tok-string { color: #9ccc65; }
+.tok-number { color: #f78c6c; }
+.tok-keyword { color: #c792ea; font-weight: 600; }
+/* A builtin the script calls — `Character(…)`, `hero.说(…)`. One colour for both
+   spellings of the name: `角色` and `Character` are the same API (see
+   `BUILTIN_ALIASES`), and a reader should not have to translate to see it. */
+.tok-builtin { color: #82aaff; }
+.tok-ident { color: var(--pamela-text); }
+.tok-operator { color: #89ddff; }
+
+.editor__text:focus {
+  outline: none;
+}
+
+/* Drawn over the call a file drag would snap to, between the coloured text (z1)
+   and the transparent textarea (z3) so the highlight tints the function name but
+   never hides the caret or steals input. */
+.editor__call-highlight {
+  position: absolute;
+  z-index: 2;
+  pointer-events: none;
+  border-radius: 4px;
+  background: rgba(127, 219, 255, 0.18);
+  border: 1px solid rgba(127, 219, 255, 0.55);
+  box-shadow: 0 0 0 1px rgba(127, 219, 255, 0.25) inset;
+}
+
+/* Find/replace: a compact bar pinned to the top-right of the editor pane, plus a
+   match overlay that paints a mark under every hit. The overlay sits between the
+   coloured text (z1) and the textarea (z3) and is itself transparent to clicks,
+   so it never steals input from the textarea above it. */
+.editor__findbar {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: rgba(18, 18, 22, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+  font-size: 12px;
+  z-index: 6;
+}
+
+.editor__find-input {
+  width: 120px;
+  font: inherit;
+  color: var(--pamela-text);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  padding: 3px 6px;
+}
+
+.editor__find-input--replace {
+  width: 100px;
+}
+
+.editor__find-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--pamela-text-faint);
+  cursor: pointer;
+  user-select: none;
+}
+
+.editor__find-info {
+  min-width: 46px;
+  text-align: center;
+  color: var(--pamela-text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.editor__find-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--pamela-text);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 3px 9px;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+/* The arrow and the dismiss are icon-only, so they carry no text to size them:
+   the glyph is what sets the box height. */
+.editor__find-btn .icon {
+  width: 12px;
+  height: 12px;
+}
+
+.editor__find-btn:hover,
+.editor__find-btn:focus-visible {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.editor__find-overlay {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.editor__find-inner {
+  position: absolute;
+  top: 0;
+  left: 0;
+  will-change: transform;
+}
+
+.editor__find-mark {
+  position: absolute;
+  background: rgba(255, 214, 102, 0.28);
+  border-radius: 2px;
+  box-shadow: inset 0 -2px 0 rgba(255, 214, 102, 0.9);
+}
+
+.editor__find-mark--active {
+  background: rgba(255, 214, 102, 0.5);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 214, 102, 0.9),
+    inset 0 -2px 0 rgba(255, 214, 102, 0.9);
+}
+
+/* Live syntax errors, underlined on the offending line. Same coordinate system
+   as the find marks, but red and never interactive: the textarea sits above it
+   (z-index 3), so a mark must not swallow a click or a drag. */
+.editor__error-overlay {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.editor__error-inner {
+  position: absolute;
+  top: 0;
+  left: 0;
+  will-change: transform;
+}
+
+.editor__error-mark {
+  position: absolute;
+  background: rgba(224, 108, 117, 0.16);
+  border-radius: 2px;
+  box-shadow: inset 0 -2px 0 rgba(224, 108, 117, 0.95);
+}
+
+/* The per-line colour-picker swatches for `rgbTo`/`hex` calls (see
+   `ui/editor-extras.js` and `updateTintMarkers`). The layer sits over the
+   gutter and is transparent to the pointer except on a swatch, so dragging an
+   image onto a line — and editing the text underneath — is unaffected. Each
+   swatch is positioned by the script, in pixels from the layer's top-left. */
+.editor__tint {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* Swatches are placed at their position in the text; the strip is translated as
+   one box when the textarea scrolls, so a scroll costs one style write instead
+   of a rebuild of every swatch. */
+.editor__tint-inner {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  will-change: transform;
+}
+
+.editor__tint-mark {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  padding: 0;
+  border: 1px solid var(--pamela-border);
+  border-radius: 3px;
+  box-sizing: border-box;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.editor__tint-mark:hover {
+  filter: brightness(1.2);
+}
+
+/* --- completion list --- */
+
+/* The candidate list shown while a script is typed. Fixed to the viewport
+   because it is anchored to the caret's measured position, which is already in
+   viewport coordinates; `left`/`top` are set inline once the size is known. */
+.completion {
+  position: fixed;
+  z-index: 300;
+  min-width: 180px;
+  max-width: 420px;
+  max-height: 220px;
+  overflow: auto;
+  padding: 4px;
+  background: #111111;
+  border: 1px solid var(--pamela-border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+}
+
+.completion__item {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.completion__item.is-active {
+  background: var(--pamela-selection);
+}
+
+/* Names are what the writer is choosing between, so they carry the editor's
+   own font and read as code; the description beside them stays quiet. */
+.completion__name {
+  font-family: var(--pamela-editor-font);
+  font-size: 13px;
+  color: var(--pamela-text);
+}
+
+.completion__detail {
+  overflow: hidden;
+  font-size: 11px;
+  color: var(--pamela-text-faint);
+  text-overflow: ellipsis;
+}
+
+/* --- stage --- */
+
+/* Vertically fills the editor area and centers a 16:9 frame. The frame keeps
+   its shape where there is room and is clamped by the viewport otherwise; the
+   background image is `cover`, so it never distorts. */
+.stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  /* The menu lives inside the picture now (see `.stage__menu`), so the stage no
+     longer has to reserve a strip below the frame for it: the picture gets the
+     whole stage, and the menu rides on the picture's own corner.
+
+     The size is the menu's font size, and it is only a fallback — `ui/stage-menu.js`
+     measures the picture and sets it from the picture's width, so the words keep
+     the same share of the picture whether it fills the window or sits in a corner
+     of the editor. */
+  --stage-menu-size: 22px;
+  padding: 16px;
+  background: var(--pamela-black);
+}
+
+.stage__frame {
+  position: relative;
+  height: 100%;
+  width: auto;
+  aspect-ratio: 16 / 9;
+  max-width: 100%;
+  overflow: hidden;
+  background: #050505;
+  border: 1px solid var(--pamela-border);
+}
+
+/* `isolation` makes the surface one stacking context. The scene objects inside
+   are ordered by z-index on the elements themselves (see `sceneOrder` in
+   `ui/space.js`), and the cover layers start at 1000: without this the stage's
+   own numbers would compete with the editor's menus, modals and toasts, which
+   live outside the frame. It also keeps the lamp layer's `screen` blend inside
+   the picture. */
+.stage__surface {
+  position: absolute;
+  inset: 0;
+  isolation: isolate;
+}
+
+/* --- 播放器模式的开始画面 ---
+   进入播放器后先是一整块黑屏，中央一个播放按钮与一行说明；一次左键点击或
+   空格才从入口脚本开始演出。覆盖整个 .stage（包括下方文字菜单），因此开始
+   之前的点击不会穿透到舞台对白。 */
+.player-start {
+  position: fixed;
+  inset: 0;
+  /* 低于模态确认窗（100），高于舞台画面；右下角提示气泡（1000）仍在其上。 */
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2.4vmin;
+  background: #000;
+  color: #e6e6e6;
+  cursor: pointer;
+}
+
+.player-start[hidden] {
+  display: none;
+}
+
+.player-start__button {
+  display: grid;
+  place-items: center;
+  width: 11vmin;
+  height: 11vmin;
+  min-width: 64px;
+  min-height: 64px;
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff;
+  cursor: pointer;
+}
+
+.player-start__button:hover,
+.player-start__button:focus-visible {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.player-start__button .icon {
+  width: 42%;
+  height: 42%;
+  stroke-width: 1.5;
+  fill: currentColor;
+  transform: translateX(6%);
+}
+
+.player-start__hint {
+  margin: 0;
+  font-size: 1.8vmin;
+  letter-spacing: 0.08em;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+/* The layer stack. The layers fill the frame and are declared in a fixed order;
+   the script only ever replaces the contents of one layer.
+
+   background and character deliberately have **no** `z-index` of their own, and
+   no `transform` / `filter` / `opacity < 1` / `will-change`: any of those would
+   create a stacking context and trap their pictures inside the layer. Free of
+   them, the pictures' own z-index values compare with each other across the two
+   layers — which is what lets a character stand behind the backdrop. Cover
+   layers (video upwards) take the 1000–9999 range. */
+.stage__layer {
+  position: absolute;
+  inset: 0;
+}
+
+/* Video and Effect layers are appended after the four original ones so those
+   keep their child indices; explicit z-index puts them back under the dialogue
+   box and the question, where weather and a playing clip belong. */
+.stage__layer--video,
+.stage__layer--effect {
+  pointer-events: none;
+}
+
+/* Cover layers sit above every scene object, whose z-index never passes 999
+   (`ORDER_CEILING` in `ui/space.js`). Their numbers keep the order this file
+   used to express with 1 / 2 / 3 / 4. */
+.stage__layer--video {
+  z-index: 1000;
+}
+
+.stage__layer--effect {
+  z-index: 1001;
+}
+
+/* The light layer: one canvas of every lamp, painted by `ui/light.js`.
+   `screen` is what keeps a light additive — it can brighten the frame and
+   never darken it — and the dialogue box and the question stay above it, so a
+   lamp lights the scene rather than the interface. The explicit z-index is also
+   what gives the layer the stacking context `mix-blend-mode` needs. */
+.stage__layer--light {
+  pointer-events: none;
+  z-index: 1003;
+  mix-blend-mode: screen;
+}
+
+.stage__light {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 100%;
+  height: 100%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+/* The reference lines (`stage.guideline`) are one transparent canvas over the
+   whole frame, just under the axes. It is a reading aid rather than a scene
+   object, so it sits above the dialogue and the question and never swallows a
+   click meant for the stage. Its backing store is half the logical size; CSS
+   stretches it to the frame exactly as the light canvas is. */
+.stage__guideline {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 1005;
+}
+
+/* The axes layer is one transparent canvas over the whole frame. It is a
+   debugging overlay, so it sits above the dialogue and the question, and never
+   swallows a click meant for the stage. Its backing store is half the logical
+   size; CSS stretches it to the frame exactly as the light canvas is. */
+.stage__axes {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 1006;
+}
+
+/* `stage.pamela()` 的开场动画盖住整个镜头，包括对话框、参考线与坐标轴。 */
+.stage__layer--intro {
+  pointer-events: none;
+  z-index: 1010;
+}
+
+.pamela-intro {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.stage__video,
+.stage__effect {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 100%;
+  height: 100%;
+  transform: translate(-50%, -50%);
+  transform-origin: center;
+  pointer-events: none;
+  user-select: none;
+}
+
+.stage__video {
+  object-fit: contain;
+}
+
+.stage__video-tint-defs {
+  position: absolute;
+  width: 0;
+  height: 0;
+}
+
+/* The script's coordinates arrive as `left`/`top` percentages, written by
+   `stage.js`; the defaults centre the image, and the translate keeps the point
+   on the image's own centre rather than its top-left corner. Percentages — not
+   pixels — are what make the layout the same at every window size. Turning and
+   resizing are written by `stage.js` onto the same `transform`, which repeats
+   this translate because it replaces the declaration whole. */
+.stage__background,
+.stage__character {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 100%;
+  height: 100%;
+  transform: translate(-50%, -50%);
+  user-select: none;
+}
+
+/* The backdrop fills the frame, cropping rather than distorting. */
+.stage__background {
+  object-fit: cover;
+}
+
+/* A character is fitted inside the frame instead, so it stands against the
+   backdrop rather than hiding it. */
+.stage__character {
+  object-fit: contain;
+}
+
+/* A Text object paints words over the frame: above the pictures, videos and
+   particles, below the dialogue box and the question. The layer is inert so a
+   click meant for the stage still reaches it. Text keeps its own layer for now
+   (depth ordering covers background and characters only), so its z-index is a
+   cover-layer number rather than an element one. */
+.stage__layer--text {
+  pointer-events: none;
+  z-index: 1002;
+}
+
+/* The words carry the frame the stage writes — centre coordinates in
+   percentages, a turn and a scale — the same way a character does, so a Text
+   and a Character placed at the same point stand in the same place. The font
+   size is written in pixels scaled to the frame; `pre` keeps the line breaks
+   the author typed instead of reflowing them. */
+.stage__text {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  /* Western in JetBrains Mono, Chinese in 思源黑体; a script may replace both
+     with one family through `Text.font`, and the stage writes that stack inline. */
+  font-family: var(--pamela-text-font);
+  line-height: 1.3;
+  white-space: pre;
+  text-align: center;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.55);
+  user-select: none;
+}
+
+/* A character whose eight points have been pulled on is drawn as a mesh
+   instead of as one image: a full-frame wrapper holding eight clipped pieces,
+   one per triangle of the picture. It rides above the plain image, which the
+   stage takes out of the drawing when the mesh is built — a script that never
+   touches the eight points keeps the plain, undistorted rendering. */
+.stage__mesh {
+  position: absolute;
+  inset: 0;
+}
+
+/* One triangle of the picture. The clip says where it shows; the picture
+   inside is the whole bitmap, stretched over the frame, and the matrix puts
+   the triangle's own part of it back where it belongs. */
+.stage__piece {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+.stage__piece__image {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  /* The matrix is written in frame pixels from the piece's own top-left
+     corner, so the turn, the stretch and the shift are all one map. */
+  transform-origin: 0 0;
+  pointer-events: none;
+}
+
+/*
+ * 舞台已启用但无内容时显示空状态说明，而非黑色矩形。
+ */
+   The hint has two rules it must keep. It is a `::before`, so it is painted
+   *under* the layer stack: a `::after` fills the frame from above the layers
+   and would be the target of every click, which is exactly what made the
+   choice buttons unclickable on a stage with nothing drawn yet. And it takes
+   no pointer events, so even a future change to the order cannot hand it a
+   click that belongs to a control. */
+.stage.is-empty .stage__frame::before {
+  content: "运行脚本后在这里显示演出";
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--pamela-text-faint);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  pointer-events: none;
+}
+
+/* The frame gets a soft inner vignette and a hairline edge so the 16:9 scene
+   reads like a game viewport rather than a bare box. */
+.stage__frame {
+  box-shadow:
+    inset 0 0 120px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+
+/* A blinking "continue" triangle, bottom-right of the frame — the visual tell
+   that more text is waiting. Decorative only: it shows whenever a scene is up,
+   so treat it as a nudge rather than a precise "text finished" signal. The
+   dialogue plate may already draw its own, in which case this is easy to drop.
+
+   The menu lives in the same corner, so it takes the triangle's place while it
+   is out (see the rule below). */
+.stage:not(.is-empty) .stage__frame::after {
+  content: "▼";
+  position: absolute;
+  right: 14px;
+  bottom: 10px;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 14px;
+  pointer-events: none;
+  animation: pamela-blink 1.1s ease-in-out infinite;
+}
+
+/* The menu slides into that same corner, so the triangle steps aside while it is
+   there: two marks in one place read as a mistake. `animation: none` is what
+   stops the blink — the keyframes drive `opacity`, and a running animation
+   beats a plain declaration. */
+.stage.is-menu-open .stage__frame::after {
+  animation: none;
+  opacity: 0;
+}
+
+@keyframes pamela-blink {
+  0%, 100% { opacity: 0.18; }
+  50% { opacity: 0.9; }
+}
+
+/* --- the stage's text menu --- */
+
+/* The player's menu is a line of bare words in the picture's own bottom-right
+   corner, the way a visual novel puts it: no tray, no pill, no border, no
+   background.
+
+   It is a child of the 16:9 frame, not a sibling of it. That is the whole
+   point of the change: the menu belongs to the picture, so it has to sit on the
+   picture — the same corner, the same size, whether the stage is a tab in the
+   editor or the whole screen. Hanging it off the frame's outside edge made the
+   editor and the fullscreen show two different menus.
+
+   The font size is the picture's own (see `--stage-menu-size`), not the
+   window's, so the words keep the same share of the picture at any size. */
+.stage__menu {
+  position: absolute;
+  right: 12px;
+  bottom: 5px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 1.1em;
+  justify-content: flex-end;
+  align-items: baseline;
+  max-width: 88%;
+  /*
+  * 该行是叠加在画面上的文字，不设置底部托盘条。
+  */
+  background: none;
+  border: 0;
+  /* Above the scene (the surface is a stacking context of its own) but below the
+     panels that cover it: backlog 6, settings 9, exit 11. */
+  z-index: 5;
+  /* The size the picture's width works out to; `ui/stage-menu.js` keeps it
+     current as the picture is resized. */
+  font-size: var(--stage-menu-size);
+
+  /* 平时藏在画面里：指针走到右下角才滑出来（`ui/stage-menu.js` 给 `.stage`
+     挂上 `is-menu-open`）。滑出的方向是画面下缘——菜单从画外往上滑进画内，画框
+     的 `overflow: hidden` 正好把还没滑完的部分裁掉。
+
+     `visibility` 一起藏：藏起来的字不该还能被 Tab 选中，也不该留在无障碍树里。
+     它跟着动画一起换——展开时立刻可见，收起时等滑完再真的藏起来。 */
+  visibility: hidden;
+  opacity: 0;
+  transform: translateY(100%);
+  pointer-events: none;
+  transition:
+    opacity 180ms ease,
+    transform 220ms cubic-bezier(0.22, 0.68, 0.24, 1),
+    visibility 0s linear 220ms;
+}
+
+/* The pointer is in the corner: the menu slides out.
+
+   这里没有 `:focus-within` 那一支。点过按钮之后，焦点会留在那个字上；要是焦点
+   也算一份「菜单该露出来」，指针一离开菜单就再也不肯收回去了。收起只看指针的
+   位置——指针不在右下角，菜单就收起。 */
+.stage.is-menu-open .stage__menu {
+  visibility: visible;
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+  transition:
+    opacity 180ms ease,
+    transform 220ms cubic-bezier(0.22, 0.68, 0.24, 1),
+    visibility 0s linear 0s;
+}
+
+/* One word of the menu. Everything that would make it look like a button is
+   deliberately absent — no fill, no border, no radius, no padding beyond what
+   the letter-spacing needs — so what is left is text on the picture. */
+.stage__menu-item {
+  font-family: var(--pamela-font);
+  /* Inherited from the row above, which sizes it as a share of the stage. */
+  font-size: inherit;
+  /* `1` rather than a comfortable reading leading: the row's bottom edge is
+     what the 5px offset is measured to, and any leading below the glyphs would
+     silently add to it. The words are one line each, so there is no leading to
+     want between them anyway. */
+  line-height: 1;
+  letter-spacing: 0.12em;
+  padding: 0;
+  color: rgba(255, 255, 255, 0.72);
+  background: none;
+  border: 0;
+  cursor: pointer;
+  /* Two soft shadows rather than a plate: they keep the glyphs readable over a
+     bright backdrop without drawing a box around them. */
+  text-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.85),
+    0 0 8px rgba(0, 0, 0, 0.55);
+  transition: color 140ms ease, text-shadow 140ms ease;
+}
+
+/* Hover and focus only lift the ink; the selection state below is what says a
+   toggle is on. No outline either — the default ring would be a box, which is
+   exactly what this menu is not allowed to draw. */
+.stage__menu-item:hover:not(:disabled),
+.stage__menu-item:focus-visible:not(:disabled) {
+  outline: none;
+  color: #fff;
+  text-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.9),
+    0 0 10px rgba(0, 0, 0, 0.65);
+}
+
+/* A word with nothing to do — 存档 while the run stands somewhere a save cannot
+   resume from. It fades rather than vanishing: the menu keeps its shape, and
+   the reason is in the tooltip. */
+.stage__menu-item:disabled {
+  cursor: default;
+  color: rgba(255, 255, 255, 0.3);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+
+/* The one selected word. A visual novel marks it by stroking the text itself,
+   so the state lives in the glyphs and nowhere else — no plate, no box, no
+   underline. The ring is drawn with eight offset shadows rather than with
+   `-webkit-text-stroke`, because a stroke is centred on the glyph's edge and
+   eats into the letterform, which makes the selected word look thinner than
+   its neighbours instead of bolder. Eight offsets paint a 1px ring around the
+   outside, where it belongs, and `paint-order` is not needed. */
+.stage__menu-item.is-active,
+.stage__menu-item.is-active:hover,
+.stage__menu-item.is-active:focus-visible {
+  color: #fff;
+  font-weight: 600;
+  text-shadow:
+    -1px -1px 0 var(--pamela-accent),
+    0 -1px 0 var(--pamela-accent),
+    1px -1px 0 var(--pamela-accent),
+    -1px 0 0 var(--pamela-accent),
+    1px 0 0 var(--pamela-accent),
+    -1px 1px 0 var(--pamela-accent),
+    0 1px 0 var(--pamela-accent),
+    1px 1px 0 var(--pamela-accent),
+    0 0 12px rgba(0, 0, 0, 0.75);
+}
+
+/* --- the backlog --- */
+
+/* The backlog is a scrim over the whole scene, not a card floating in it: the
+   picture stays visible behind a dim veil and the lines are read straight on
+   top of it, the way the dialogue box itself is read. A card would put the
+   text in a second frame inside the frame and lose the picture behind it,
+   which is exactly the association the player is looking for when they scroll
+   back to a line. */
+.backlog {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  /* The veil: dark enough that white text reads over any backdrop, light
+     enough that the scene is still plainly there behind it — the player is
+     re-reading a line *in its scene*, not reading a log file. */
+  background: rgba(6, 8, 12, 0.42);
+  backdrop-filter: blur(1px);
+  -webkit-backdrop-filter: blur(1px);
+  z-index: 6;
+  animation: pamela-backlog-in 140ms ease-out;
+}
+
+@keyframes pamela-backlog-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.backlog[hidden] {
+  display: none;
+}
+
+/* The head is a quiet line of its own: the word 回看, the way out, and the
+   gesture that also closes it. It sits at the top edge so the text below reads
+   from the same place the dialogue does. */
+.backlog__head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 3% 5% 8px;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 12px;
+  letter-spacing: 0.18em;
+}
+
+.backlog__title {
+  color: rgba(255, 255, 255, 0.85);
+  font-weight: 600;
+}
+
+/* The hint is a gesture, so it fades out once the player has scrolled — the
+   list scrolls it away with the content rather than pinning it. */
+.backlog__hint {
+  flex: 1 1 auto;
+  color: rgba(255, 255, 255, 0.4);
+  letter-spacing: 0.08em;
+}
+
+.backlog__close {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 4px;
+  color: rgba(255, 255, 255, 0.5);
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.backlog__close .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.backlog__close:hover,
+.backlog__close:focus-visible {
+  color: #fff;
+}
+
+/* The lines. The body is the scroller, and it is the element the wheel is
+   listened to on: a wheel over the text scrolls the backlog, and a wheel at
+   the top edge closes it (see `wireStageControls`). */
+.backlog__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 0 5% 4%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* One line, laid out like the dialogue box's own text: the name in the accent
+   colour, the line after it. The ring of shadow is what keeps white glyphs
+   readable over a bright or busy backdrop without drawing a plate behind
+   them — the same reason the stage menu uses one.
+
+   The measure is capped rather than filling the frame: a line running the whole
+   width of a 16:9 stage produces lines longer than the intended measure. */
+.backlog__row {
+  max-width: 60ch;
+  padding: 6px 0;
+  color: #fff;
+  font-size: 15px;
+  line-height: 1.7;
+  text-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.9),
+    0 0 10px rgba(0, 0, 0, 0.7);
+}
+
+/* The most recent line is the one the player just read, so it is the one the
+   list opens on and the one that stays brightest as they scroll away. */
+.backlog__row:last-child {
+  color: #fff;
+}
+
+.backlog__name {
+  color: var(--pamela-accent);
+  font-weight: 600;
+  margin-right: 0.5em;
+}
+
+.backlog__empty {
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 13px;
+  padding: 12px 0;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+}
+
+/* --- save/load slot panel --- */
+
+/* One panel, over the scene: the player never gets two grids stacked on the
+   stage, because the host refills this element instead of appending another.
+   It covers the frame rather than the whole window, so the save being made is
+   read against the picture it belongs to. */
+.slots {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3.5%;
+  background: rgba(4, 4, 8, 0.72);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  z-index: 8;
+  animation: pamela-slots-in 150ms ease-out;
+}
+
+.slots[hidden] {
+  display: none;
+}
+
+@keyframes pamela-slots-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* The sheet itself. A visual novel's save screen is a quiet card on top of a
+   dimmed scene, so the picture stays readable behind it and the grid reads as
+   the only thing to interact with. */
+.slots__panel {
+  display: flex;
+  flex-direction: column;
+  width: min(880px, 100%);
+  max-height: 100%;
+  padding: 16px 18px 18px;
+  background: linear-gradient(
+    180deg,
+    rgba(18, 20, 28, 0.96),
+    rgba(10, 11, 16, 0.96)
+  );
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  /* The outer shadow seats the sheet on the scene; the inner line keeps the
+     top edge from dissolving into a bright backdrop. */
+  box-shadow:
+    0 18px 60px rgba(0, 0, 0, 0.65),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.slots__head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* The heading is the panel's own name, letter-spaced the way the stage menu
+   is, so the two read as one interface. The accent bar in front of it is what
+   tells 存档 from 读档 at a glance, without a second label saying which is on. */
+.slots__title {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.24em;
+  color: #fff;
+}
+
+.slots__title::before {
+  content: "";
+  width: 3px;
+  height: 13px;
+  flex: 0 0 auto;
+  background: var(--pamela-accent);
+  border-radius: 2px;
+}
+
+.slots__pager {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.slots__pager-button {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  font: inherit;
+  line-height: 1;
+  color: rgba(255, 255, 255, 0.85);
+  background: none;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.slots__pager-button .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.slots__pager-button:hover:not(:disabled),
+.slots__pager-button:focus-visible:not(:disabled) {
+  color: #fff;
+  border-color: var(--pamela-accent);
+}
+
+.slots__pager-button:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.slots__pager-label {
+  min-width: 44px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.slots__close {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 4px;
+  color: rgba(255, 255, 255, 0.55);
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.slots__close .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.slots__close:hover,
+.slots__close:focus-visible {
+  color: #fff;
+}
+
+/* Three columns of four rows, the page shape every visual novel's save screen
+   uses. Each row is a small picture beside its words rather than a full-width
+   picture: a 16:9 stage is short, and four rows of large plates would need more
+   height than the frame has. The rows are sized by their content and the grid
+   scrolls, so a small window loses the last row rather than squashing them. */
+.slots__grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-auto-rows: min-content;
+  gap: 10px;
+  padding-top: 14px;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+/* One slot: the preview on the left, the words on the right. It is a button
+   because a click is what it takes, but it draws as a framed row rather than as
+   a control — the frame is the picture's, and the hover is what says it can be
+   picked. */
+.slots__slot {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px;
+  min-width: 0;
+  text-align: left;
+  font: inherit;
+  color: var(--pamela-text);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    background 120ms ease,
+    box-shadow 120ms ease,
+    transform 120ms ease;
+}
+
+/* The hover lifts the row and rings it, which is how a pickable card behaves
+   everywhere else in the editor; a filled slot shows its action word at the same
+   moment, so lifting the row and naming the action are one gesture. */
+.slots__slot:hover:not(:disabled),
+.slots__slot:focus-visible:not(:disabled) {
+  outline: none;
+  border-color: var(--pamela-accent);
+  background: rgba(76, 141, 255, 0.12);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+  transform: translateY(-1px);
+}
+
+.slots__slot:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.slots__slot--empty {
+  background: rgba(255, 255, 255, 0.02);
+  border-style: dashed;
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+.slots__slot--empty:hover:not(:disabled) {
+  border-style: solid;
+}
+
+/* The picture's box keeps the frame's 16:9 so a page of slots lines up even when
+   half of them are empty, and it is small enough that four rows fit: it is the
+   preview, not the point. */
+.slots__shot {
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 74px;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  background: #050508;
+  border-radius: 4px;
+  /* A hairline inside the picture's own box: it separates a bright backdrop
+     from the card behind it without adding a second frame around the row. */
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+.slots__shot-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  user-select: none;
+}
+
+/* The stand-in for a slot with no picture: its own number, which is what tells
+   the player which slot they are about to write. */
+.slots__shot-blank {
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  color: rgba(255, 255, 255, 0.28);
+}
+
+/* The words, which are what a player actually reads: they take the rest of the
+   row and truncate rather than pushing the picture out of shape. */
+.slots__body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.slots__name {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--pamela-text);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.slots__when {
+  font-size: 11px;
+  color: var(--pamela-text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* An empty slot's words are one step quieter than a save's: the row is a
+   place to write, not something already written. */
+.slots__slot--empty .slots__name {
+  color: var(--pamela-text-muted);
+  font-weight: 400;
+}
+
+/* What the click does, spelled out on the row's own last line: "保存" on an
+   empty slot, "覆盖" on a filled one, "读取" when loading. */
+.slots__action {
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  color: var(--pamela-text-muted);
+}
+
+.slots__slot:hover:not(:disabled) .slots__action,
+.slots__slot:focus-visible:not(:disabled) .slots__action {
+  color: var(--pamela-accent);
+}
+
+/* The delete control a filled slot carries: out of the way until the row is
+   hovered, so a save grid reads as pictures and words first. Its own click
+   stops the slot's pick handler, because clearing a save is not a load. */
+.slots__delete {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  font: inherit;
+  line-height: 1;
+  color: var(--pamela-text-faint);
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.slots__slot:hover:not(:disabled) .slots__delete,
+.slots__slot:focus-visible:not(:disabled) .slots__delete {
+  opacity: 1;
+}
+
+.slots__delete .icon {
+  width: 11px;
+  height: 11px;
+}
+
+.slots__delete:hover {
+  color: #ff6b6b;
+  border-color: #ff6b6b;
+}
+
+/* --- the stage's settings panel --- */
+
+/* 设置 is a layer of the scene, built the way the save grid is: it changes how
+   the performance is read, and it is reached from the stage's own menu, so it
+   covers the frame rather than the whole window. Above the slot grid, because
+   it is opened from the menu while a save panel could still be behind it. */
+.stage-settings {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3.5%;
+  background: rgba(4, 4, 8, 0.72);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  z-index: 9;
+  animation: pamela-slots-in 150ms ease-out;
+}
+
+/* The card is deliberately small: one section, one row of options. A settings
+   panel that fills the screen would suggest there is more to find. */
+.stage-settings__panel {
+  width: min(440px, 100%);
+  background: linear-gradient(
+    180deg,
+    rgba(18, 20, 28, 0.97),
+    rgba(10, 11, 16, 0.97)
+  );
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  box-shadow:
+    0 18px 60px rgba(0, 0, 0, 0.65),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.stage-settings__head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* Letter-spaced like the stage menu and the save grid, so the three read as one
+   interface rather than three unrelated dialogs. */
+.stage-settings__title {
+  flex: 1 1 auto;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.24em;
+  color: #fff;
+}
+
+.stage-settings__close {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 4px;
+  color: rgba(255, 255, 255, 0.55);
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.stage-settings__close .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.stage-settings__close:hover,
+.stage-settings__close:focus-visible {
+  color: #fff;
+}
+
+.stage-settings__body {
+  padding: 14px 16px 16px;
+}
+
+/* The section title and nothing under it. The options are the whole
+   explanation: a player who chose 中速 knows what it means. */
+.stage-settings__section {
+  margin: 0 0 10px;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  color: rgba(255, 255, 255, 0.62);
+}
+
+/* A segmented control: one rail, four equal cells. The current one is filled
+   with the accent rather than marked with a dot, so the row states the value
+   once instead of twice. */
+.stage-settings__options {
+  display: flex;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+}
+
+.stage-settings__option {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 8px 4px;
+  font: inherit;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  color: rgba(255, 255, 255, 0.72);
+  background: transparent;
+  border: 0;
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.stage-settings__option:first-child {
+  border-left: 0;
+}
+
+.stage-settings__option:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.stage-settings__option:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--pamela-accent);
+}
+
+.stage-settings__option.is-active,
+.stage-settings__option.is-active:hover {
+  color: #fff;
+  background: rgba(76, 141, 255, 0.28);
+}
+
+.stage-settings__option.is-active:focus-visible {
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.55);
+}
+
+/* --- the stage's exit confirm --- */
+
+/* Esc 在舞台上是唯一还看得见的出口：全屏与播放器模式把标签栏和菜单栏都藏了，
+   没有 × 可点。于是它先问一句，而不是把演出悄悄停掉。它盖住画面而不是窗口，
+   和存档格子、设置面板同一层语言，也顺手挡住一次误触。 */
+.stage-exit {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3.5%;
+  background: rgba(4, 4, 8, 0.72);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  z-index: 11;
+  animation: pamela-slots-in 150ms ease-out;
+}
+
+/* 卡片比设置面板还窄：一句话、两个按钮，再宽就像有别的要选。 */
+.stage-exit__panel {
+  width: min(360px, 100%);
+  padding: 16px 18px 14px;
+  background: linear-gradient(
+    180deg,
+    rgba(18, 20, 28, 0.97),
+    rgba(10, 11, 16, 0.97)
+  );
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  box-shadow:
+    0 18px 60px rgba(0, 0, 0, 0.65),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+/* 和舞台菜单、存档格子、设置面板同一套字距，四个界面才读成一个。 */
+.stage-exit__title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.24em;
+  color: #fff;
+}
+
+.stage-exit__body {
+  margin: 10px 0 16px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.stage-exit__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.stage-exit__button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 84px;
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.86);
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.stage-exit__button:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.stage-exit__button:focus-visible {
+  outline: none;
+  border-color: var(--pamela-accent);
+  box-shadow: 0 0 0 1px var(--pamela-accent);
+}
+
+.stage-exit__button--primary {
+  color: #fff;
+  background: var(--pamela-accent);
+  border-color: var(--pamela-accent);
+}
+
+.stage-exit__button--primary:hover {
+  background: #5d99ff;
+  border-color: #5d99ff;
+}
+
+/* 键位提示：小一号、压暗，让「退出」两个字仍然是最先读到的。 */
+.stage-exit__key {
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.stage-exit__button--primary .stage-exit__key {
+  color: rgba(255, 255, 255, 0.75);
+}
+
+/* The choice layer sits above the dialogue box: a column of buttons in the
+   middle of the frame, waiting for the player. It only takes pointer events
+   while a question is up, so it never swallows a click meant for the stage. */
+.stage__layer--choice {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6%;
+  pointer-events: none;
+  z-index: 1005;
+}
+
+/* The layer is a flex box, so the element's own `hidden` needs saying again:
+   the display above would otherwise win over the attribute's default. */
+.stage__layer--choice[hidden] {
+  display: none;
+}
+
+.stage__choice {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(60%, 620px);
+  max-height: 100%;
+  overflow-y: auto;
+  pointer-events: auto;
+}
+
+/* One option. The background matches the dialogue box's plate so a question
+   reads as part of the same picture rather than as shell chrome. */
+.stage__choice__button {
+  font-family: var(--pamela-font);
+  font-size: 20px;
+  line-height: 1.4;
+  padding: 14px 20px;
+  color: #ffffff;
+  background: rgba(0, 0, 0, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: center;
+  transition: background 120ms linear, border-color 120ms linear;
+}
+
+/* The global focus ring is off, so the hover and focus states are the two
+   that say which row a click or a number key would pick. */
+.stage__choice__button:hover,
+.stage__choice__button:focus-visible {
+  background: rgba(76, 141, 255, 0.28);
+  border-color: var(--pamela-accent);
+}
+
+/* --- dialogue box --- */
+
+/* The dialogue layer is above the characters, and inert: a click on the box is
+   heard on the stage element, not here. It takes the last interface number
+   under the choice layer, both above the scene's 0–999 range. */
+.stage__layer--dialogue {
+  pointer-events: none;
+  z-index: 1004;
+}
+
+/* The live plate is a canvas painted from the style's layers; the stamp is the
+   baked PNG an older style still names. Only one is ever visible. Both are
+   filled with `fill`, not `cover`, because they are authored at the frame's
+   own 16:9 size. The canvas comes after the text blocks in the DOM — keeping
+   the box's long-standing child order — so z-index puts them back underneath. */
+.dialogue__stamp,
+.dialogue__plate {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  user-select: none;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* The stand-in plate, drawn when the style names none — or names one that will
+   not load. A bare `say` with nothing behind it is unreadable over a bright
+   picture, and a narration box that was never stamped had exactly that: text
+   floating on the scene. The bar is placed by `dialog.js` over the text blocks
+   themselves, so it frames a line rather than darkening the frame. The colours
+   match the built-in template's plate (black at 55%, a hairline edge) so a
+   project that has not designed a box yet still reads as one. */
+.dialogue__fallback {
+  position: absolute;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.55);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+}
+
+.dialogue__fallback[hidden] {
+  display: none;
+}
+
+/* The name plate and the line. `dialog.js` writes their boxes as percentages
+   of the frame and their font sizes in pixels scaled to it; here they only
+   need to lay their text out. */
+.dialogue__speaker,
+.dialogue__text {
+  position: absolute;
+  display: flex;
+  overflow: hidden;
+  z-index: 1;
+}
+
+/* A row, so `justify-content` places the name left, centred or right. */
+.dialogue__speaker {
+  align-items: center;
+  white-space: nowrap;
+}
+
+/* A column, so `justify-content` places the line top, middle or bottom. */
+.dialogue__text {
+  flex-direction: column;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* The auto-play countdown: a ring in the bottom-right corner that drains as the
+   line waits to advance. It is built by `dialog.js` as an SVG and sized here, so
+   the same mark scales with the frame instead of with the window. */
+.dialogue__countdown {
+  position: absolute;
+  right: 1.4%;
+  bottom: 1.4%;
+  width: clamp(20px, 2.6vmin, 44px);
+  height: clamp(20px, 2.6vmin, 44px);
+  transform: rotate(-90deg);
+  pointer-events: none;
+  opacity: 0.72;
+}
+
+/* The `hidden` attribute has to win over the rule above, or the ring would
+   keep drawing after a line is settled. */
+.dialogue__countdown[hidden] {
+  display: none;
+}
+
+.dialogue__countdown-bg,
+.dialogue__countdown-fg {
+  fill: none;
+  stroke-width: 3;
+}
+
+/* The track: the time the line had, in a colour that reads on any picture. */
+.dialogue__countdown-bg {
+  stroke: rgba(255, 255, 255, 0.22);
+}
+
+/* The draining part. `dialog.js` writes `stroke-dashoffset` each frame; the
+   round cap keeps the leading end from looking chopped as it shrinks. */
+.dialogue__countdown-fg {
+  stroke: rgba(255, 255, 255, 0.86);
+  stroke-linecap: round;
+}
+
+/* `stage.click` 的点击位置标记：右下角一个朝下的小箭头，等待点击期间显示，
+   与倒计时圆环同一角落、同一缩放，方便玩家一眼找到该点哪里。 */
+.dialogue__click {
+  position: absolute;
+  right: 1.4%;
+  bottom: 1.4%;
+  width: clamp(20px, 2.6vmin, 44px);
+  height: clamp(20px, 2.6vmin, 44px);
+  pointer-events: none;
+  opacity: 0.86;
+}
+
+.dialogue__click[hidden] {
+  display: none;
+}
+
+.dialogue__click-mark {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.86);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* --- dialogue designer --- */
+
+/* Fills the editor area the way `.stage` and `.image-view` do. `.dialog-editor`
+   is `height: 100%`, so without a height here the percentage has nothing to
+   resolve against and the designer would be as tall as its contents — which
+   makes the right-hand properties panel, showing only the selected block, set
+   the height of the whole thing. */
+.dialog-view {
+  height: 100%;
+}
+
+/* Fills the editor area the way `.dialog-view` does. */
+.image-edit {
+  height: 100%;
+}
+
+.image-editor {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--pamela-black);
+}
+
+.image-editor__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--pamela-border);
+}
+
+.image-editor__btn {
+  padding: 4px 10px;
+  background: transparent;
+  border: 1px solid var(--pamela-border);
+  border-radius: 4px;
+  color: var(--pamela-text);
+  font: inherit;
+  font-size: 12px;
+  cursor: default;
+}
+
+.image-editor__btn:hover {
+  background: var(--pamela-hover);
+}
+
+.image-editor__body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.image-editor__canvas-wrap {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  padding: 16px;
+  background:
+    repeating-conic-gradient(#2a2a2a 0% 25%, transparent 0% 50%) 50% / 24px 24px;
+}
+
+.image-editor__canvas {
+  max-width: 100%;
+  max-height: 100%;
+  background: var(--pamela-surface);
+  box-shadow: 0 0 0 1px var(--pamela-border);
+}
+
+.image-editor__side {
+  flex: 0 0 240px;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--pamela-border);
+  min-height: 0;
+}
+
+.image-editor__layers {
+  flex: 0 0 auto;
+  max-height: 40%;
+  overflow: auto;
+  border-bottom: 1px solid var(--pamela-border);
+  padding: 8px;
+}
+
+.image-editor__props {
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 8px;
+}
+
+.image-editor__layer {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--pamela-text);
+  font: inherit;
+  font-size: 12px;
+  cursor: default;
+}
+
+.image-editor__layer:hover {
+  background: var(--pamela-hover);
+}
+
+.image-editor__layer.is-selected {
+  background: var(--pamela-selection);
+}
+
+.image-editor__prop-title {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--pamela-text-muted);
+}
+
+.image-editor__field {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 11px;
+  color: var(--pamela-text-faint);
+}
+
+.image-editor__field input[type="range"] {
+  width: 100%;
+}
+
+.image-editor__field-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 2px;
+}
+
+.image-editor__field-value {
+  color: var(--pamela-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.image-editor__field input[type="text"],
+.image-editor__field input[type="color"] {
+  width: 100%;
+  margin-top: 2px;
+}
+
+/* Audio editor: toolbar + waveform canvas + control sliders. */
+.audio-edit {
+  height: 100%;
+}
+
+.audio-editor {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--pamela-black);
+}
+
+.audio-editor__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--pamela-border);
+}
+
+.audio-editor__btn {
+  padding: 4px 10px;
+  background: transparent;
+  border: 1px solid var(--pamela-border);
+  border-radius: 4px;
+  color: var(--pamela-text);
+  font: inherit;
+  font-size: 12px;
+  cursor: default;
+}
+
+.audio-editor__btn:hover {
+  background: var(--pamela-hover);
+}
+
+.audio-editor__canvas-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  padding: 16px;
+  background: var(--pamela-surface);
+}
+
+.audio-editor__canvas {
+  max-width: 100%;
+  box-shadow: 0 0 0 1px var(--pamela-border);
+}
+
+.audio-editor__controls {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 8px;
+  border-top: 1px solid var(--pamela-border);
+}
+
+.audio-editor__field {
+  display: block;
+  font-size: 11px;
+  color: var(--pamela-text-faint);
+}
+
+.audio-editor__field input[type="range"] {
+  width: 140px;
+  display: block;
+  margin-top: 2px;
+}
+
+/* Toolbar across the top, then the layer list, the plate and its properties.
+   The plate is the frame the runtime lays out in, so the preview is a real
+   one rather than an approximation of it. */
+.dialog-editor {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--pamela-black);
+}
+
+.dialog-editor__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--pamela-border);
+}
+
+.dialog-editor__spacer {
+  flex: 1 1 auto;
+}
+
+.dialog-editor__button {
+  /* Icon-only: the glyph sets the box, the title carries the words. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 4px 6px;
+  background: transparent;
+  border: 1px solid var(--pamela-border);
+  border-radius: 4px;
+  color: var(--pamela-text);
+  font: inherit;
+  font-size: 12px;
+  cursor: default;
+}
+
+.dialog-editor__button .icon {
+  width: 15px;
+  height: 15px;
+}
+
+/* Copy-to-slot shows the destination slot plus a small arrow. */
+.dialog-editor__button--copy .icon:last-child {
+  width: 10px;
+  height: 10px;
+  opacity: 0.7;
+}
+
+.dialog-editor__button:hover {
+  background: var(--pamela-hover);
+}
+
+/* The slot being edited, the grid left on, and any other toggle held down. */
+.dialog-editor__button.is-active {
+  background: var(--pamela-selection);
+  border-color: var(--pamela-accent);
+}
+
+.dialog-editor__button:disabled {
+  opacity: 0.4;
+}
+
+/* --- panel headers, collapse, compact icon buttons --- */
+
+.dialog-editor__panel-head {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 24px;
+  margin: 0 0 6px;
+}
+
+.dialog-editor__panel-title {
+  flex: 1 1 auto;
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--pamela-text-muted);
+}
+
+.dialog-editor__panel-actions {
+  display: flex;
+  gap: 2px;
+}
+
+/* The chevron and the layer actions are glyph-only: the box is theirs. */
+.dialog-editor__panel-toggle,
+.dialog-editor__button--compact {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 20px;
+  padding: 0;
+  color: var(--pamela-text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: default;
+}
+
+.dialog-editor__button--compact {
+  /* Shares `.dialog-editor__button`, so the border it draws there is dropped. */
+  border-color: transparent;
+}
+
+.dialog-editor__panel-toggle .icon,
+.dialog-editor__button--compact .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.dialog-editor__panel-toggle:hover,
+.dialog-editor__button--compact:hover:not(:disabled) {
+  background: var(--pamela-hover);
+  color: var(--pamela-text);
+}
+
+.dialog-editor__button--compact:disabled {
+  opacity: 0.35;
+}
+
+/* Collapsed side panels: a rail wide enough for the chevron alone. */
+.dialog-editor__body.is-layers-collapsed {
+  grid-template-columns: 34px minmax(0, 1fr) 240px;
+}
+
+.dialog-editor__body.is-props-collapsed {
+  grid-template-columns: 190px minmax(0, 1fr) 34px;
+}
+
+.dialog-editor__body.is-layers-collapsed.is-props-collapsed {
+  grid-template-columns: 34px minmax(0, 1fr) 34px;
+}
+
+.dialog-editor__layers.is-collapsed,
+.dialog-editor__props.is-collapsed {
+  padding: 8px 4px;
+}
+
+.dialog-editor__layers.is-collapsed .dialog-editor__panel-title,
+.dialog-editor__layers.is-collapsed .dialog-editor__panel-actions,
+.dialog-editor__layers.is-collapsed .dialog-editor__panel-body,
+.dialog-editor__props.is-collapsed .dialog-editor__panel-title,
+.dialog-editor__props.is-collapsed .dialog-editor__panel-body {
+  display: none;
+}
+
+.dialog-editor__layers.is-collapsed .dialog-editor__panel-head,
+.dialog-editor__props.is-collapsed .dialog-editor__panel-head {
+  justify-content: center;
+}
+
+.dialog-editor__body {
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr) 240px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* `min-height: 0` so a long layer list or a tall property block scrolls inside
+   its own column. A grid item would otherwise be as tall as its contents and
+   push the row past the body, which is the same "the designer is sized by its
+   contents" fault one level down. */
+.dialog-editor__layers,
+.dialog-editor__props {
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+}
+
+.dialog-editor__layers {
+  border-right: 1px solid var(--pamela-border);
+}
+
+.dialog-editor__props {
+  border-left: 1px solid var(--pamela-border);
+}
+
+/* The 16:9 frame of `.stage__frame`, which the designer reuses so the preview
+   is laid out by the same rules the stage uses. The aspect ratio is written by
+   `dialog-editor.js` from the document's own canvas. */
+.dialog-editor__viewer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  padding: 16px;
+  /* The frame is fitted to this box by `fitFrame()`, so nothing should ever
+     overflow — hiding it keeps a scrollbar from flashing during the fit. */
+  overflow: hidden;
+}
+
+.dialog-editor__plate {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/* Zoom and pan are applied to this wrapper, never to `.stage__frame`: the
+   runtime's own frame must stay free of transforms. */
+.dialog-editor__stage {
+  position: relative;
+  flex: none;
+  transform-origin: center center;
+}
+
+/* Editor-only overlays. The grid sits over the plate but under the text; the
+   alignment lines sit above everything so a drag can always see them. Neither
+   is written into the style file. */
+.dialog-editor__grid,
+.dialog-editor__snap-guides {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.dialog-editor__grid {
+  background-image:
+    repeating-linear-gradient(to right, rgba(255, 255, 255, 0.08) 0 1px, transparent 1px 40px),
+    repeating-linear-gradient(to bottom, rgba(255, 255, 255, 0.08) 0 1px, transparent 1px 40px);
+}
+
+.dialog-editor__snap-guides {
+  z-index: 1006;
+}
+
+.dialog-editor__snap-line {
+  position: absolute;
+  background: var(--pamela-accent);
+  opacity: 0.9;
+}
+
+.dialog-editor__snap-line--v {
+  top: 0;
+  bottom: 0;
+  width: 1px;
+}
+
+.dialog-editor__snap-line--h {
+  left: 0;
+  right: 0;
+  height: 1px;
+}
+
+/* The editor's test picture, under the plate. The plate is a transparent
+   canvas, so whatever is behind it is what the text is being judged against.
+   Never stamped: a backdrop baked into the plate would follow every scene the
+   runtime shows. */
+.dialog-editor__backdrop {
+  position: absolute;
+  inset: 0;
+  background-position: center;
+  background-size: cover;
+  background-repeat: no-repeat;
+}
+
+/* --- selection chrome --- */
+
+/* The selection box and its grips, laid over the plate. The container is
+   transparent to the pointer so a press still reaches the plate underneath and
+   is handled by the frame; only the grips opt back in, which is what makes a
+   press on a grip resize instead of picking a layer. None of this is ever
+   stamped: it is the designer's chrome, drawn in the DOM rather than on the
+   canvas. */
+.dialog-editor__handles {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* Position, size and angle are written as percentages by `renderHandles`, so
+   the box tracks the plate as the window resizes. `outline` rather than a
+   border because it sits outside the box without adding to its size, and it
+   turns with the box like the layer does. */
+.dialog-editor__selection {
+  position: absolute;
+  outline: 1px solid var(--pamela-accent);
+  transform-origin: center;
+  pointer-events: none;
+}
+
+/* The eight grips, one per `HANDLES` name. Each is placed on its own corner or
+   edge midpoint by the two rules that follow; the translate pulls it back by
+   half its own size, so the grip is centred on that point rather than hanging
+   off it. */
+.dialog-editor__handle {
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  border: 1px solid var(--pamela-accent);
+  border-radius: 2px;
+  background: var(--pamela-black);
+  transform: translate(-50%, -50%);
+  pointer-events: auto;
+}
+
+.dialog-editor__handle:hover {
+  background: var(--pamela-accent);
+}
+
+/* Left/centre/right on the horizontal axis. */
+.dialog-editor__handle--w,
+.dialog-editor__handle--nw,
+.dialog-editor__handle--sw {
+  left: 0;
+}
+
+.dialog-editor__handle--n,
+.dialog-editor__handle--s {
+  left: 50%;
+}
+
+.dialog-editor__handle--e,
+.dialog-editor__handle--ne,
+.dialog-editor__handle--se {
+  left: 100%;
+}
+
+/* Top/middle/bottom on the vertical axis. */
+.dialog-editor__handle--n,
+.dialog-editor__handle--nw,
+.dialog-editor__handle--ne {
+  top: 0;
+}
+
+.dialog-editor__handle--w,
+.dialog-editor__handle--e {
+  top: 50%;
+}
+
+.dialog-editor__handle--s,
+.dialog-editor__handle--sw,
+.dialog-editor__handle--se {
+  top: 100%;
+}
+
+.dialog-editor__handle--nw,
+.dialog-editor__handle--se {
+  cursor: nwse-resize;
+}
+
+.dialog-editor__handle--ne,
+.dialog-editor__handle--sw {
+  cursor: nesw-resize;
+}
+
+.dialog-editor__handle--n,
+.dialog-editor__handle--s {
+  cursor: ns-resize;
+}
+
+.dialog-editor__handle--e,
+.dialog-editor__handle--w {
+  cursor: ew-resize;
+}
+
+/* A polygon is dragged by its own corners, so these grips are round rather than
+   square and sit wherever a vertex happens to be: `renderHandles` writes their
+   position inline, as a share of the box the vertices cover. */
+.dialog-editor__handle--vertex {
+  border-radius: 50%;
+  cursor: move;
+}
+
+/* The turn grip: hung above the box's top edge so it never competes with a
+   corner, which is left free to resize. The stem is drawn by `::after` rather
+   than by a second element, so `renderHandles` still makes one node per grip.
+   Both turn with the box, since the selection box they live in is rotated. */
+.dialog-editor__handle--rotate {
+  left: 50%;
+  top: 0;
+  border-radius: 50%;
+  transform: translate(-50%, calc(-50% - 18px));
+  cursor: grab;
+}
+
+.dialog-editor__handle--rotate:active {
+  cursor: grabbing;
+}
+
+.dialog-editor__handle--rotate::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  width: 1px;
+  height: 18px;
+  background: var(--pamela-accent);
+}
+
+/* --- text region guides --- */
+
+/* The dashes showing where the runtime lays the name and the line out. Like the
+   handles, this layer is transparent to the pointer so a press still falls
+   through to the plate and picks whatever shape is there. It is dashes and
+   nothing else: the blocks show the sample words, so the only way to read a
+   block is by what is written in it and by its row in the layer list. None of
+   it is ever stamped: the text is DOM, and so is the sign of where it goes. */
+.dialog-editor__regions {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.dialog-editor__region {
+  position: absolute;
+  border: 1px dashed rgba(255, 255, 255, 0.35);
+  pointer-events: none;
+}
+
+.dialog-editor__region.is-selected {
+  border-color: var(--pamela-accent);
+}
+
+/* A heading that starts a new group rather than the panel. */
+.dialog-editor__heading--spaced {
+  margin-top: 14px;
+}
+
+/* A system component is not a layer, and its row says so: it has no eye to
+   click and no place in the stack — only a name to select. */
+.dialog-editor__layer--system .dialog-editor__layer-name {
+  color: var(--pamela-text-faint);
+}
+
+.dialog-editor__layer--system.is-selected .dialog-editor__layer-name {
+  color: var(--pamela-text);
+}
+
+/* Provides the visibility toggle column, so row kinds align. */
+.dialog-editor__sys-mark {
+  flex: 0 0 auto;
+  width: 16px;
+  font-size: 10px;
+  text-align: center;
+  color: var(--pamela-text-faint);
+}
+
+/* The block whose region is selected, marked in the panel the same way the
+   guide is marked on the plate. */
+.dialog-editor__section.is-selected {
+  border-left: 2px solid var(--pamela-accent);
+  padding-left: 6px;
+}
+
+.dialog-editor__heading {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--pamela-text-muted);
+}
+
+.dialog-editor__section + .dialog-editor__section {
+  margin-top: 14px;
+}
+
+.dialog-editor__hint {
+  margin: 0 0 8px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--pamela-text-faint);
+}
+
+.dialog-editor__layer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--pamela-text);
+  cursor: default;
+}
+
+.dialog-editor__layer:hover {
+  background: var(--pamela-hover);
+}
+
+.dialog-editor__layer.is-selected {
+  background: var(--pamela-selection);
+}
+
+.dialog-editor__eye {
+  flex: 0 0 auto;
+  width: 16px;
+  padding: 0;
+  background: none;
+  border: 0;
+  color: var(--pamela-text-muted);
+  font-size: 10px;
+  line-height: 1;
+  cursor: default;
+}
+
+.dialog-editor__layer-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.dialog-editor__field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+  font-size: 11px;
+}
+
+.dialog-editor__field-label {
+  flex: 0 0 52px;
+  color: var(--pamela-text-faint);
+}
+
+.dialog-editor__pair {
+  display: flex;
+  gap: 8px;
+}
+
+.dialog-editor__pair .dialog-editor__field {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.dialog-editor__pair .dialog-editor__field-label {
+  flex: 0 0 auto;
+}
+
+/* The body is inert chrome, so the fields have to opt back into selection and
+   into the webview's own text cursor. */
+.dialog-editor__field input,
+.dialog-editor__field select {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 3px 5px;
+  /* `background-color` keeps the arrow the global select rule paints. */
+  background-color: var(--pamela-black);
+  border: 1px solid var(--pamela-border);
+  border-radius: 4px;
+  color: var(--pamela-text);
+  font: inherit;
+  font-size: 11px;
+  user-select: text;
+}
+
+.dialog-editor__field select {
+  padding-right: 20px;
+}
+
+.dialog-editor__field input[type="color"] {
+  flex: 0 0 auto;
+  width: 32px;
+  height: 22px;
+  padding: 1px;
+}
+
+.dialog-editor__field input[type="checkbox"] {
+  flex: 0 0 auto;
+}
+
+.dialog-editor__field input:focus,
+.dialog-editor__field select:focus {
+  outline: none;
+  border-color: var(--pamela-accent);
+}
+
+.tree__empty {
+  margin: 0;
+  padding: 12px;
+  font-size: 12px;
+  color: var(--pamela-text-faint);
+}
+
+/* Scripts are the files the engine consumes, so they are the only tree entries
+   drawn at full brightness. */
+.tree__row--script .tree__label {
+  color: var(--pamela-text);
+}
+
+.tree__row--file:not(.tree__row--script) .tree__label {
+  color: var(--pamela-text-muted);
+}
+
+/* The entry script is set in `pamela.json`; the badge is what makes that
+   visible, since the entry opens the same file the fallback would. */
+.tree__entry-badge {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 0 4px;
+  border: 1px solid var(--pamela-border);
+  border-radius: 3px;
+  color: var(--pamela-accent);
+  font-size: 10px;
+  line-height: 14px;
+}
+
+/* --- image viewer --- */
+
+/* An image is shown rather than edited, so the viewer fills the editor area:
+   a 16:9 frame would crop whatever does not share the stage's shape. */
+.image-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 16px;
+  background: var(--pamela-black);
+}
+
+.image-view__frame {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  padding: 12px;
+  background: #050505;
+  border: 1px solid var(--pamela-border);
+}
+
+/* Fitted inside the frame, so a picture larger than the window is scaled down
+   instead of being cropped or overflowing. */
+.image-view__image {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  user-select: none;
+}
+
+.image-view__meta {
+  flex: 0 0 auto;
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--pamela-text-faint);
+  text-align: center;
+}
+
+/* --- key frame editing layout --- */
+
+/* While a key is being edited the stage stacks instead of overlapping: the
+   control strip, then the picture, then the key frame dock. Nothing is laid
+   over the scene, so the author always sees the whole frame — and the room the
+   bars need comes out of the picture's own height rather than out of a magic
+   number that would have to be kept in step with their contents. */
+.stage.is-path-editing {
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+}
+
+/* The frame is no longer the only thing on the stage, so it takes what is left
+   after the bars instead of the whole height, and keeps its 16:9 shape from
+   that. */
+.stage.is-path-editing .stage__frame {
+  height: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* The player's menu has nothing to do while the author is editing, and it would
+   only compete for the room the bars need. */
+.stage.is-path-editing .stage__menu {
+  display: none;
+}
+
+/* --- motion path editor --- */
+
+/* The editor is its own panel: a toolbar on top, a preview of the scene in the
+   middle, and the key frame dock below. The preview is the editor's own stage —
+   not the live performance stage — so the two stay separate, the controls sit
+   outside the picture, and the picture is shrunk to make room for them. */
+.path-editor {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: #050505;
+  pointer-events: auto;
+  z-index: 40;
+}
+
+.path-editor[hidden] {
+  display: none;
+}
+
+/* The band between the top toolbar and the bottom dock that holds the editor's
+   own 16:9 stage frame, centred with a little breathing room. Shrinking this is
+   what gives the controls their room. */
+.path-editor__viewport {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+}
+
+/* The editor's stage frame: the same 16:9 space the live stage uses, so points
+   drawn here map to the live stage one-to-one. The scene is rendered into this
+   by a stage the editor built for itself. */
+.path-editor__frame {
+  position: relative;
+  height: 100%;
+  width: auto;
+  aspect-ratio: 16 / 9;
+  max-width: 100%;
+}
+
+/* Where the editor's own stage layers go — the backdrop and the keyed object.
+   The scene is only ever looked at here, never clicked, so it must not swallow a
+   pointer meant for the drawing: clicks fall through to the canvas above it. */
+.path-editor__surface {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.path-editor__toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 10px;
+  pointer-events: auto;
+  font-family: var(--pamela-font);
+  font-size: 12px;
+  color: var(--pamela-text);
+}
+
+.path-editor__button {
+  /* Icon buttons: a compact square, centred glyph. The name is the tooltip, so
+     the strip stays a row of symbols rather than a row of words. */
+  min-width: 28px;
+  height: 28px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--pamela-border);
+  border-radius: 4px;
+  color: var(--pamela-text);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: default;
+}
+
+.path-editor__button:hover {
+  background: var(--pamela-hover);
+}
+
+/* The current segment is the one being shaped, so its button is lit the same
+   way the stage menu lights a mode that is on. */
+.path-editor__button.is-active {
+  border-color: var(--pamela-accent);
+  background: rgba(76, 141, 255, 0.22);
+}
+
+.path-editor__button[disabled] {
+  opacity: 0.4;
+}
+
+.path-editor__label {
+  opacity: 0.8;
+}
+
+.path-editor__gap {
+  width: 10px;
+}
+
+.path-editor__time {
+  width: 70px;
+  padding: 3px 6px;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--pamela-border);
+  border-radius: 4px;
+  color: var(--pamela-text);
+  font: inherit;
+}
+
+/* A number box and Pamela's own arrows: the webview's spinner is hidden in
+   app.css, and these two buttons are what replaces it. The box loses its right
+   rounding so the pair reads as one control. */
+.path-editor__stepper {
+  display: inline-flex;
+  align-items: stretch;
+  gap: 2px;
+}
+
+.path-editor__stepper .path-editor__time {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.path-editor__stepper-arrows {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.path-editor__stepper-button {
+  flex: 1 1 0;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  min-height: 0;
+  padding: 0;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--pamela-border);
+  border-radius: 3px;
+  color: var(--pamela-text-muted);
+  cursor: default;
+}
+
+.path-editor__stepper-button:hover {
+  background: var(--pamela-hover);
+  color: var(--pamela-text);
+}
+
+.path-editor__stepper-button .icon {
+  width: 10px;
+  height: 10px;
+}
+
+/* The drawing area fills the layer, which is itself the frame's own box. It is
+   positioned rather than a flex child: the layer is no longer a flex container
+   (the bars live on the stage now), and a block child with no content would
+   collapse to zero height — taking the lines and every point with it. */
+.path-editor__canvas {
+  position: absolute;
+  inset: 0;
+  cursor: crosshair;
+  /* Above the editor's own scene layers, so drawing always wins the click. */
+  z-index: 10;
+}
+
+.path-editor__lines {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  /* The strokes are drawn, not clicked: a pointer reaches the canvas beneath. */
+  pointer-events: none;
+}
+
+/* The whole path, faint: where the move goes before the piece being shaped. */
+.path-editor__line--path {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.28);
+  stroke-width: 3;
+  vector-effect: non-scaling-stroke;
+}
+
+/* The segment under the pointer, brighter. */
+.path-editor__line--segment {
+  fill: none;
+  stroke: var(--pamela-accent);
+  stroke-width: 3;
+  vector-effect: non-scaling-stroke;
+}
+
+.path-editor__point {
+  fill: rgba(0, 0, 0, 0.55);
+  stroke: var(--pamela-accent);
+  stroke-width: 3;
+  vector-effect: non-scaling-stroke;
+  cursor: grab;
+}
+
+/* The start is where the object already stands; it is not part of the segment,
+   so it reads as a marker rather than a handle. */
+.path-editor__point--start {
+  stroke: rgba(255, 255, 255, 0.7);
+  stroke-dasharray: 5 4;
+  cursor: default;
+}
+
+/* A curve's control handle: drawn hollow and dashed so it reads as "the thing
+   bending the line" rather than as another path point. */
+.path-editor__point--control {
+  stroke: rgba(255, 255, 255, 0.75);
+  stroke-dasharray: 3 3;
+  fill: rgba(76, 141, 255, 0.18);
+  cursor: move;
+}
+
+/* The 预览播放 marker: where the object would be partway through the walk. Filled
+   solid and drawn last, so it sits over the line it is travelling. */
+.path-editor__preview {
+  fill: var(--pamela-accent);
+  stroke: rgba(255, 255, 255, 0.9);
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+
+/* --- key frame dock --- */
+
+/* The dock sits under the drawing area: a timeline of the path's segments on
+   top, the selected segment's key frame values below it. It is closed by
+   default so the stage keeps the height it needs for placing points. */
+.path-editor__dock {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px;
+  pointer-events: auto;
+  background: rgba(0, 0, 0, 0.35);
+  border-top: 1px solid var(--pamela-border);
+}
+
+.path-editor__dock[hidden] {
+  display: none;
+}
+
+/* One block per segment, as wide as its share of the run. Widths are in
+   percentages of the row, so the whole path always fills it — what an author
+   reads here is pacing, not absolute time. */
+.path-editor__timeline {
+  display: flex;
+  gap: 3px;
+  height: 26px;
+  align-items: stretch;
+}
+
+.path-editor__clip {
+  min-width: 18px;
+  padding: 0 4px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--pamela-border);
+  border-radius: 3px;
+  color: var(--pamela-text-faint);
+  font: inherit;
+  font-size: 11px;
+  cursor: default;
+  overflow: hidden;
+}
+
+.path-editor__clip:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.path-editor__clip.is-active {
+  background: rgba(76, 141, 255, 0.28);
+  border-color: var(--pamela-accent);
+  color: var(--pamela-text);
+}
+
+.path-editor__frames {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.path-editor__field {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--pamela-font);
+  font-size: 12px;
+  color: var(--pamela-text);
+}
+
+/* The keyed object's own outline. A key animates that object where it stands,
+   so the editor shows where that is; the first key frame is its centre. */
+.path-editor__outline {
+  fill: rgba(76, 141, 255, 0.06);
+  stroke: rgba(255, 255, 255, 0.35);
+  stroke-width: 2;
+  stroke-dasharray: 8 6;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+
+/* --- the object's free-transform frame --- */
+
+/* The outline is drawn inside a rotated <g>, so all eight handles and the
+   rotate handle turn with the picture. A pending outline is the object as it
+   has been dragged but not yet committed: lit, so a live edit never looks like
+   the key frame it came from. */
+.path-editor__outline.is-pending {
+  fill: rgba(76, 141, 255, 0.12);
+  stroke: var(--pamela-accent);
+  stroke-dasharray: 6 4;
+}
+
+.path-editor__handle {
+  fill: #ffffff;
+  stroke: var(--pamela-accent);
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+
+/* The rotate handle sits outside the box, the way a Word picture frame does.
+   A circle, so it never reads as a ninth resize handle. */
+.path-editor__handle--rotate {
+  fill: rgba(76, 141, 255, 0.25);
+  stroke: #ffffff;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.path-editor__rotate-stem {
+  stroke: rgba(255, 255, 255, 0.6);
+  stroke-width: 2;
+  stroke-dasharray: 4 3;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+
+/* A bend point sits on the path line and is what the author drags to shape
+   the curve. Hollow with a solid ring, so it reads as a control rather than as
+   another key frame. With none of them the line is straight. */
+.path-editor__point--bend {
+  fill: rgba(76, 141, 255, 0.2);
+  stroke: #ffffff;
+  stroke-dasharray: none;
+}
+
+/* The selected key frame and its incoming connection stand out from the rest
+   of the route, so which frame the live object belongs to is always obvious. */
+.path-editor__point.is-active {
+  fill: var(--pamela-accent);
+  stroke: #ffffff;
+}
+
+.path-editor__line--segment.is-active {
+  stroke: var(--pamela-accent);
+  stroke-width: 4;
+}

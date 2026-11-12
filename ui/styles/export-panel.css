@@ -1,0 +1,476 @@
+/* 导出 MP4 的参数浮窗与帧率轮盘。 */
+/* Pamela — the MP4 export sheet and its frame-rate wheel. */
+
+/* 窗口级的一层：导出不占用舞台，画面画在离屏画布上，所以这一层盖住整个窗口。
+   z-index 低于 `.select-popup`（950），下拉列表才不会被它压住。 */
+.export-panel {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(4, 4, 8, 0.62);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  font-family: var(--pamela-font);
+  color: var(--pamela-text);
+  animation: pamela-export-in 150ms ease-out;
+}
+
+@keyframes pamela-export-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.export-panel__card {
+  position: relative;
+  width: min(480px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow: hidden;
+  background: linear-gradient(
+    180deg,
+    rgba(18, 20, 28, 0.97),
+    rgba(10, 11, 16, 0.98)
+  );
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  box-shadow:
+    0 24px 70px rgba(0, 0, 0, 0.7),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  animation: pamela-export-card-in 180ms cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+@keyframes pamela-export-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* --- 标题栏 --- */
+
+.export-panel__head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* 与设置面板、存档网格同一套字号与字距，三个浮层读起来是一套界面。 */
+.export-panel__title {
+  flex: 1 1 auto;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  color: #fff;
+}
+
+.export-panel__close {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 4px;
+  color: rgba(255, 255, 255, 0.55);
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.export-panel__close .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.export-panel__close:hover,
+.export-panel__close:focus-visible {
+  color: #fff;
+}
+
+/* --- 参数表 --- */
+
+.export-panel__body {
+  padding: 8px 18px 4px;
+}
+
+.export-panel__row {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 6px 0;
+}
+
+.export-panel__label {
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  color: var(--pamela-text-muted);
+}
+
+.export-panel__control {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  min-width: 0;
+}
+
+/* 文件名那一行：输入框占满，路径提示落在它下面。 */
+.export-panel__row--name .export-panel__control {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 5px;
+}
+
+.export-panel__input {
+  width: 100%;
+  padding: 6px 9px;
+  background: var(--pamela-black);
+  border: 1px solid var(--pamela-border);
+  border-radius: 5px;
+  color: var(--pamela-text);
+  font: inherit;
+  font-size: 13px;
+  user-select: text;
+}
+
+.export-panel__input:focus {
+  outline: none;
+  border-color: var(--pamela-accent);
+}
+
+.export-panel__input.is-invalid {
+  border-color: #ff6b5e;
+}
+
+.export-panel__hint {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+  color: var(--pamela-text-faint);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* `exports/名字.mp4`：等宽字，读起来像一个路径而不是一句话。 */
+.export-panel__row--name .export-panel__hint {
+  font-family: var(--pamela-editor-font);
+}
+
+.export-panel__static {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--pamela-text);
+}
+
+.export-panel__static.is-muted {
+  color: var(--pamela-text-faint);
+}
+
+.export-panel .select {
+  min-width: 128px;
+  padding: 5px 8px;
+  background-color: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.14);
+  font-size: 12.5px;
+}
+
+.export-panel .select:hover {
+  background-color: rgba(255, 255, 255, 0.09);
+}
+
+.export-panel__error {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #ff6b5e;
+}
+
+/* --- 帧率选框（轮盘的入口）--- */
+
+.export-panel__fps {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px 5px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  color: #fff;
+  font: inherit;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease;
+}
+
+.export-panel__fps:hover,
+.export-panel__fps:focus-visible {
+  background: rgba(76, 141, 255, 0.14);
+  border-color: rgba(76, 141, 255, 0.55);
+}
+
+.export-panel__fps .icon {
+  width: 12px;
+  height: 12px;
+  opacity: 0.6;
+}
+
+/* --- 帧率轮盘 --- */
+
+/* 轮盘铺满卡片：它换掉的是表单，而不是在表单上再加一层小气泡。 */
+.export-wheel {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(5, 6, 10, 0.72);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+}
+
+.export-wheel__dial {
+  position: relative;
+  width: calc(var(--radius, 88px) * 2 + 48px);
+  height: calc(var(--radius, 88px) * 2 + 48px);
+}
+
+/* 每一项都从圆心出发：收起态缩在正中，展开态落到自己那一格。 */
+.export-wheel__option,
+.export-wheel__cancel {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  margin: -22px 0 0 -22px;
+  border-radius: 50%;
+  background: rgba(18, 20, 28, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: #fff;
+  font: inherit;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  opacity: 0;
+  transform: translate(0, 0) scale(0.35);
+  transition:
+    transform 220ms cubic-bezier(0.2, 0.9, 0.25, 1),
+    opacity 160ms ease,
+    border-color 140ms ease,
+    background 140ms ease;
+  /* 收起：反向的 stagger，最后弹出的那一项先回去。 */
+  transition-delay: calc(
+    (var(--count, 8) - 1 - var(--i, 0)) * 12ms
+  );
+}
+
+.export-wheel__option:hover,
+.export-wheel__option:focus-visible,
+.export-wheel__cancel:hover,
+.export-wheel__cancel:focus-visible {
+  background: rgba(30, 40, 60, 0.98);
+  border-color: var(--pamela-accent);
+}
+
+.export-wheel__option[aria-checked="true"] {
+  border-color: var(--pamela-accent);
+  color: var(--pamela-accent);
+  box-shadow: 0 0 0 1px rgba(76, 141, 255, 0.35) inset;
+}
+
+/* 轮盘正中：取消。它是唯一不带方位的一项，所以只做缩放。 */
+.export-wheel__cancel {
+  width: 52px;
+  height: 52px;
+  margin: -26px 0 0 -26px;
+  background: rgba(10, 11, 16, 0.98);
+  font-size: 11.5px;
+  letter-spacing: 0.08em;
+  color: rgba(255, 255, 255, 0.7);
+  transform: scale(0.5);
+  transition-delay: 0ms;
+}
+
+.export-wheel.is-open .export-wheel__option {
+  opacity: 1;
+  transform: translate(var(--x, 0), var(--y, 0)) scale(1);
+  /* 弹出：按顺序一个个出来。 */
+  transition-delay: calc(var(--i, 0) * 22ms);
+}
+
+.export-wheel.is-open .export-wheel__cancel {
+  opacity: 1;
+  transform: scale(1);
+  transition-delay: 0ms;
+}
+
+/* 关闭途中不接受第二次点击：看上去还在，其实已经收起了。 */
+.export-wheel.is-closing {
+  pointer-events: none;
+}
+
+.export-wheel[hidden] {
+  display: none;
+}
+
+/* --- 进度 --- */
+
+.export-panel__progress,
+.export-panel__result {
+  padding: 18px;
+}
+
+.export-panel__phase {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--pamela-text-muted);
+}
+
+.export-panel__bar {
+  position: relative;
+  height: 6px;
+  margin: 16px 0 12px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+}
+
+.export-panel__fill {
+  width: 0;
+  height: 100%;
+  background: linear-gradient(90deg, #3f7de0, var(--pamela-accent));
+  border-radius: 3px;
+  box-shadow: 0 0 12px rgba(76, 141, 255, 0.45);
+  transition: width 140ms linear;
+}
+
+.export-panel__stats {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 14px;
+  font-size: 11.5px;
+  color: var(--pamela-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 帧渲染的百分比是这块界面唯一的重点数字。 */
+.export-panel__percent {
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.1;
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+}
+
+.export-panel__path {
+  margin: 10px 0 12px;
+  font-family: var(--pamela-editor-font);
+  font-size: 13px;
+  color: #fff;
+  word-break: break-all;
+}
+
+.export-panel__path.is-error {
+  font-family: var(--pamela-font);
+  color: #ff6b5e;
+}
+
+/* 结果页的两个次要动作：一个带到文件夹，一个留在浮窗里再导一次。 */
+.export-panel__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 2px;
+}
+
+.export-panel__link {
+  padding: 0;
+  background: none;
+  border: 0;
+  color: var(--pamela-accent);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.export-panel__link:hover,
+.export-panel__link:focus-visible {
+  text-decoration: underline;
+}
+
+/* --- 按钮 --- */
+
+.export-panel__foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 18px 16px;
+}
+
+.export-panel__button {
+  min-width: 86px;
+  padding: 7px 16px;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 6px;
+  color: var(--pamela-text);
+  font: inherit;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease;
+}
+
+.export-panel__button:hover {
+  background: var(--pamela-hover);
+}
+
+.export-panel__button--primary {
+  background: var(--pamela-accent);
+  border-color: var(--pamela-accent);
+  color: #fff;
+}
+
+.export-panel__button--primary:hover {
+  background: #5d99ff;
+}
+
+.export-panel__button[disabled] {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* 轮盘是给「点一下就好」的手势准备的；减少动态时它直接换屏，不弹不缩。 */
+@media (prefers-reduced-motion: reduce) {
+  .export-panel,
+  .export-panel__card {
+    animation: none;
+  }
+
+  .export-wheel__option,
+  .export-wheel__cancel,
+  .export-panel__fill {
+    transition: none;
+  }
+}

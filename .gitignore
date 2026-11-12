@@ -1,0 +1,28 @@
+/target
+/gen
+/dist
+/docs
+/.c*
+.tmp-help/
+tmp-stage/
+tools/*/target
+node_modules
+*.pdb
+
+# 构建 / 测试输出
+cargo-out.txt
+node-out.txt
+*.log
+notify_done.ps1
+*.bak
+
+/*.bat
+/scripts/*
+
+# 临时改名 / 诊断脚本（下划线前缀 = 一次性工具）
+/t-*.txt
+/t-*.mjs
+/tools/_*.mjs
+
+# 本机手动验收清单
+/test.md

@@ -1,0 +1,245 @@
+/* 菜单栏样式。 */
+/* Pamela — menu bar. */
+
+.menubar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: stretch;
+  height: var(--pamela-menubar-height);
+  padding: 0 4px;
+  background: var(--pamela-surface);
+  border-bottom: 1px solid var(--pamela-border);
+}
+
+.menubar__menu {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+}
+
+.menubar__title {
+  padding: 0 10px;
+  border: 0;
+  background: transparent;
+  color: var(--pamela-text);
+  font: inherit;
+  font-size: 12px;
+  cursor: default;
+  border-radius: 3px;
+}
+
+.menubar__title:hover {
+  background: var(--pamela-hover);
+}
+
+.menubar__title[aria-expanded="true"] {
+  background: var(--pamela-active);
+}
+
+.menubar__title:focus-visible {
+  outline: 1px solid var(--pamela-accent);
+  outline-offset: -2px;
+}
+
+/* 帮助 / 关于 look like the menu titles beside them, but they run their command
+   instead of opening a popup. A hairline in front of the group marks the change
+   from categories to actions, the way a toolbar separates its sections. */
+.menubar__title--action:first-of-type {
+  margin-left: 6px;
+  padding-left: 14px;
+}
+
+.menubar__title--action:first-of-type::before {
+  content: "";
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  left: -1px;
+  width: 1px;
+  background: var(--pamela-border);
+}
+
+.menubar__title--action {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.menu {
+  display: none;
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 20;
+  min-width: 200px;
+  padding: 4px;
+  background: #111111;
+  border: 1px solid var(--pamela-border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+}
+
+.menu.is-open {
+  display: block;
+}
+
+.menu__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  width: 100%;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--pamela-text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: default;
+}
+
+.menu__item:hover:not(.is-disabled),
+.menu__item:focus-visible:not(.is-disabled) {
+  background: var(--pamela-selection);
+}
+
+.menu__item.is-disabled {
+  color: var(--pamela-text-faint);
+}
+
+/* 字体列表：每一行都用它自己的字体画，右边再画一段示例字样，选之前就能看出
+   样子；名字过长时省略，示例字样不参与收缩。 */
+.menu__item--font {
+  gap: 16px;
+}
+
+.menu__item--font .menu__label {
+  max-width: 260px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.menu__sample {
+  flex: none;
+  color: var(--pamela-text-faint);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.menu__accelerator {
+  font-size: 11px;
+  color: var(--pamela-text-faint);
+}
+
+.menu__separator {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--pamela-border);
+}
+
+/* 二级菜单：悬停或点击父项展开，位置相对父项所在的一行。 */
+.menu__submenu {
+  position: relative;
+}
+
+.menu--sub {
+  display: block;
+  top: -5px;
+  left: 100%;
+  min-width: 150px;
+}
+
+.menu--sub[hidden] {
+  display: none;
+}
+
+.menu__caret {
+  color: var(--pamela-text-faint);
+}
+
+/* 单选项的勾：不占位晃动，未选中时留空但保留宽度。 */
+.menu__check {
+  flex: none;
+  min-width: 1em;
+  visibility: hidden;
+  text-align: center;
+}
+
+.menu__item.is-checked .menu__check {
+  visibility: visible;
+}
+
+/* Same popup as the menu bar, but pinned to the pointer instead of a title.
+   `left`/`top` are set inline once the size is known. */
+.menu--context {
+  display: block;
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 200;
+  /* The font picker lists every family on the machine, which is far taller
+     than the window; it scrolls inside the popup rather than running off. */
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+/* Right-aligned launch controls: play button + run-strategy dropdown. */
+.runbar {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+}
+
+.runbar__select {
+  height: 22px;
+  font-size: 12px;
+  color: var(--pamela-text, #e8e8ea);
+  /* `background-color`, not the shorthand: the shorthand would wipe the arrow
+     the global select rule paints with `background-image`. */
+  background-color: var(--pamela-surface, #161a22);
+  border: 1px solid var(--pamela-border, rgba(255, 255, 255, 0.12));
+  border-radius: 6px;
+}
+
+/* Icon-only launch button. Lit solid while a run can start; the old look
+   borrowed --pamela-selection, a translucent blue that read as permanently
+   switched off, so the lit state gets its own opaque accent instead. */
+.runbar__play {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 22px;
+  padding: 0;
+  color: #ffffff;
+  background: var(--pamela-accent, #4c8dff);
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.runbar__play .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.runbar__play:hover:not(:disabled),
+.runbar__play:focus-visible:not(:disabled) {
+  filter: brightness(1.12);
+}
+
+/* Dimmed = a run cannot start (nothing runnable open, or no project for the
+   entry strategy). The button is also disabled in JS, so the glyph alone has
+   to carry the "not clickable" reading. */
+.runbar__play:disabled {
+  color: var(--pamela-text-faint, rgba(255, 255, 255, 0.35));
+  background: var(--pamela-active, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--pamela-border, rgba(255, 255, 255, 0.12));
+  cursor: default;
+  filter: none;
+}

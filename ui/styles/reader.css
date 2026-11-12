@@ -1,0 +1,320 @@
+/* 内置阅读器（界面文案「帮助」/「关于」）样式。 */
+/* Pamela — the built-in reader (帮助 / 关于). */
+/* 正文行宽有限，并可在顶部拖拽控件中调整：变量 --reader-measure 由 ui/reader-width.js
+   写在阅读区上，缺省值与脚本中的 READER_MEASURE.default 保持一致。 */
+
+/* --- table of contents --- */
+
+/* Every entry is a two-line block: the title, then the one line that says what
+   the article covers. The list is deliberately quiet — it is a table of
+   contents, not a menu — so the current entry is marked with the accent bar and
+   nothing else. */
+.reader-toc {
+  display: flex;
+  flex-direction: column;
+  padding: 4px 0;
+}
+
+.reader-toc__item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 7px 12px 7px 14px;
+  font: inherit;
+  text-align: left;
+  color: var(--pamela-text-muted);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.reader-toc__item:hover {
+  background: var(--pamela-hover);
+  color: var(--pamela-text);
+}
+
+/* The current article: an accent bar on the left edge, the way the editor marks
+   the active tab, rather than a filled row that would read as a selection to be
+   acted on. */
+.reader-toc__item.is-active {
+  color: var(--pamela-text);
+  background: var(--pamela-selection);
+}
+
+.reader-toc__item.is-active::before {
+  content: "";
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 0;
+  width: 2px;
+  background: var(--pamela-accent);
+}
+
+.reader-toc__item:focus-visible {
+  outline: 1px solid var(--pamela-accent);
+  outline-offset: -1px;
+}
+
+.reader-toc__title {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.reader-toc__summary {
+  font-size: 11px;
+  color: var(--pamela-text-faint);
+}
+
+/* --- article --- */
+
+/* The reader is the scroller, and it takes the whole editor area: an article is
+   read like a page, so the frame around it is the window's, not a card's. */
+.reader {
+  height: 100%;
+  overflow-y: auto;
+  background: var(--pamela-black);
+}
+
+.reader:focus-visible {
+  outline: none;
+}
+
+.reader__article {
+  /*
+   * 正文采用有限行宽而非铺满窗口；宽窗口下过长的行会降低阅读定位效率。
+   * 具体宽度由顶部的拖拽控件写入 --reader-measure（单位 ch）。
+   */
+  max-width: var(--reader-measure, 78ch);
+  margin: 0 auto;
+  padding: 34px 32px 64px;
+  user-select: text;
+}
+
+/* --- the measure grip --- */
+
+/* A bar across the top of the column, as wide as the text: its right end is the
+   edge the pointer drags, so the width it shows and the width it sets are the
+   same thing. It stays put while the article scrolls under it — the page has a
+   reading width to keep in view, and this is where that width is set.
+
+   The fade below the grip keeps the line scrolling beneath it from being cut by
+   a hard edge, the way the top of a page in a viewer is never a clean cut. */
+.reader__measure {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: min(100%, var(--reader-measure, 78ch));
+  height: 18px;
+  margin: 0 auto;
+  background: linear-gradient(to bottom, var(--pamela-black) 40%, transparent);
+  cursor: ew-resize;
+  touch-action: none;
+}
+
+/* The grip reads as a quiet rule until it is hovered, focused or dragged: the
+   reader is for reading, and a control that announced itself would compete with
+   the text under it. */
+.reader__measure::before {
+  content: "";
+  width: 56px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--pamela-border);
+  transition: background 120ms ease;
+}
+
+.reader__measure:hover::before,
+.reader__measure:focus-visible::before,
+.reader__measure.is-dragging::before {
+  background: var(--pamela-accent);
+}
+
+.reader__measure:focus-visible {
+  outline: none;
+}
+
+/* The ruler that tells the drag how many `ch` a pixel is. It inherits the same
+   font as the article, so the measured `ch` is the article's own. */
+.reader__measure-probe {
+  position: absolute;
+  width: 1ch;
+  height: 1em;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.reader__head {
+  padding-bottom: 14px;
+  margin-bottom: 22px;
+  border-bottom: 1px solid var(--pamela-border);
+}
+
+/* The name of the set above the title — 关于 / 使用手册 — so an article says
+   where it came from without a breadcrumb row of its own. */
+.reader__eyebrow {
+  margin: 0 0 6px;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--pamela-text-faint);
+}
+
+.reader__title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--pamela-text);
+}
+
+.reader__summary {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--pamela-text-muted);
+}
+
+.reader__text {
+  font-size: 13px;
+  line-height: 1.85;
+  color: var(--pamela-text);
+}
+
+.reader__paragraph {
+  margin: 0 0 14px;
+}
+
+.reader__heading {
+  margin: 26px 0 10px;
+  padding-bottom: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--pamela-border);
+  color: var(--pamela-text);
+}
+
+.reader__subheading {
+  margin: 18px 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--pamela-text);
+}
+
+.reader__list {
+  margin: 0 0 14px;
+  padding-left: 20px;
+}
+
+.reader__list li {
+  margin: 3px 0;
+}
+
+.reader__list li::marker {
+  color: var(--pamela-text-faint);
+}
+
+/* A table — the API 对照 article — is read row by row, so the columns line up
+   and rows are separated by a hairline instead of a fill: nothing here is a
+   card, and a zebra stripe would fight the article's own page. */
+.reader__table {
+  width: 100%;
+  margin: 0 0 16px;
+  font-size: 12px;
+  border-collapse: collapse;
+}
+
+.reader__table th,
+.reader__table td {
+  padding: 5px 10px 5px 0;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--pamela-border);
+}
+
+.reader__table th {
+  font-weight: 600;
+  color: var(--pamela-text-muted);
+}
+
+.reader__table th:first-child,
+.reader__table td:first-child {
+  padding-right: 14px;
+  white-space: nowrap;
+}
+
+.reader__table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+/* Inline code reads as a name from the project — a file, a call, a field — and
+   is set in a monospace face on a faint plate so it is not mistaken for prose.
+   The editor's own stack rather than the system's: it is the same face the code
+   appears in when it is opened, and it carries the Chinese that Cascadia and
+   Consolas leave to a last-resort fallback. */
+.reader__code {
+  padding: 1px 5px;
+  font-family: var(--pamela-editor-font);
+  font-size: 12px;
+  color: var(--pamela-text);
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 3px;
+}
+
+/* A block of code or a directory tree: its own surface, since what it holds is
+   read line by line and its alignment carries meaning. */
+.reader__pre {
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  font-family: var(--pamela-editor-font);
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--pamela-text);
+  background: var(--pamela-surface);
+  border: 1px solid var(--pamela-border);
+  border-radius: 6px;
+  user-select: text;
+}
+
+/* A figure — the 三维空间 diagram — is a block image with a caption under it. The
+   diagram carries its own white background, so it is framed on a light plate and
+   centred; the caption stays on the article page below it. */
+.reader__figure {
+  margin: 0 0 18px;
+  text-align: center;
+}
+
+.reader__figure-image {
+  display: block;
+  width: 100%;
+  max-width: 520px;
+  margin: 0 auto;
+  height: auto;
+  background: #ffffff;
+  border: 1px solid var(--pamela-border);
+  border-radius: 6px;
+}
+
+.reader__figure-caption {
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--pamela-text-faint);
+}
+
+/* --- the reader's tab --- */
+
+/* The article is a tab like a document is, so it can be left and come back to
+   without a mode to remember. It carries a mark instead of the file suffix the
+   other tabs use, since it has no file behind it. */
+.tab--reader .tab__label::before {
+  content: "§ ";
+  color: var(--pamela-accent);
+  font-size: 11px;
+}

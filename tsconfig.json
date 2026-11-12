@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": false,
+    "noEmit": true,
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": [
+    "ui/file-ops.js",
+    "ui/keyframe-ops.js",
+    "ui/tree-ops.js",
+    "ui/find-bar.js",
+    "ui/playback-bar.js",
+    "ui/project-lifecycle.js",
+    "ui/find.js",
+    "ui/history.js",
+    "ui/backlog.js",
+    "ui/edit-commands.js",
+    "ui/editor-errors.js",
+    "ui/panel-splitter.js",
+    "ui/resource-preview.js",
+    "ui/reader-panel.js"
+  ]
+}
