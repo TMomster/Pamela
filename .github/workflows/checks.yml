@@ -1,6 +1,5 @@
-# The six automated sections the author's local check script runs, reproduced here
-# because that script ends with an interactive `pause`, which would hang a runner.
-# The script itself is machine-specific and is not part of the repository.
+# The six automated sections of `test.bat`, without the script itself:
+# `test.bat` ends with an interactive `pause`, which would hang a runner.
 #
 # The four `tools/smoke-*.mjs` browser checks are deliberately not here. They
 # need a real Edge install, fixed local ports and a headless profile; run them

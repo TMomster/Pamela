@@ -3,27 +3,14 @@
 
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { extname, join, normalize, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { fileURLToPath } from "node:url";
 
-// 路径与浏览器都从脚本位置推导，可在 CI 或另一台机器上直接运行。
-// Root and browser are derived from this script, so it runs on CI and other machines.
-const ROOT = fileURLToPath(new URL("../ui", import.meta.url));
-const EDGE = process.env.PAMELA_EDGE ?? findEdge();
-
-function findEdge() {
-  const candidates = [
-    process.env["ProgramFiles(x86)"] && join(process.env["ProgramFiles(x86)"], "Microsoft/Edge/Application/msedge.exe"),
-    process.env.ProgramFiles && join(process.env.ProgramFiles, "Microsoft/Edge/Application/msedge.exe"),
-    "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
-    "C:/Program Files/Microsoft/Edge/Application/msedge.exe",
-  ].filter(Boolean);
-  return candidates.find((path) => existsSync(path)) ?? "msedge";
-}
+const ROOT = "G:/CBS/Pamela/ui";
+const EDGE = "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe";
 const PORT = 8983;
 const TYPES = {
   ".html": "text/html; charset=utf-8",

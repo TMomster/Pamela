@@ -121,7 +121,7 @@ Pamela 由 Momster 开发，是一个把写作、演出与编排放在同一个�
 作者      Momster
 作者主页  github.com/TMomster
 许可      开放源代码（MIT 或 Apache-2.0）
-版本      0.1.0
+版本      1.0.0
 运行平台  Windows
 技术构成  Tauri 2 + Rust 后端，原生 JavaScript 前端
 ~~~
