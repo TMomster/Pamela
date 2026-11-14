@@ -5,10 +5,19 @@
 // 最上层，导出逐帧用同一个函数画到离屏画布，因此两边看到的动画完全一致。
 
 /** 整段动画的时长。 */
-export const PAMELA_INTRO_MS = 3000;
+export const PAMELA_INTRO_MS = 3500;
+
+/**
+ * 时间线里各阶段的毫秒数都写在这一格上：`PAMELA_INTRO_MS` 比它长多少，整段
+ * 动画就按比例拉长多少，不必逐条改下面的数字。
+ */
+const INTRO_BASE_MS = 3000;
 
 /** 图标右侧显示的文字。 */
 export const PAMELA_INTRO_TEXT = "Made with Pamela";
+
+/** 标题下方的一行小字。 */
+export const PAMELA_INTRO_SUBTEXT = "github.com/tmomster/pamela";
 
 /** `icons/flower_icon.svg` 的花形，按原色（白花、黑心）绘制。 */
 export const PAMELA_ICON_PATH =
@@ -25,6 +34,12 @@ const ICON_START_X = 0.5;
 const ICON_END_X = 0.35;
 /** 文字左边缘相对图标中心再向右让出的比例。 */
 const TEXT_GAP_X = 0.045;
+/** 标题字号，以画幅宽度为单位。 */
+const TEXT_SIZE = 0.0333;
+/** 小字字号，以画幅宽度为单位。 */
+const SUBTEXT_SIZE = 0.0125;
+/** 小字基线相对标题基线下移的标题字号倍数。 */
+const SUBTEXT_GAP_Y = 0.9;
 
 const clamp01 = (value) => Math.min(1, Math.max(0, value));
 
@@ -45,20 +60,23 @@ function easeOut(x) {
  * 透明度，黑幕淡入与最后的整幅淡出是两个独立阶段。
  *
  * @param {number} elapsed 从动画开始算起的毫秒数。
- * @param {number} [total] 动画总时长，默认 3000 毫秒。
+ * @param {number} [total] 动画总时长，默认 3500 毫秒。
  */
 export function pamelaIntroState(elapsed, total = PAMELA_INTRO_MS) {
   const span = Number(total) > 0 ? Number(total) : PAMELA_INTRO_MS;
-  const scale = span / PAMELA_INTRO_MS;
+  const scale = span / INTRO_BASE_MS;
   const t = Math.min(span, Math.max(0, Number(elapsed) || 0));
   const at = (start, end) => ramp(t, start * scale, end * scale);
 
+  // 图标淡入与左移都比原来收得紧一些，让文字提早出场、在淡出前多停留一段时间。
   const black = at(0, 400);
-  const icon = at(350, 850);
-  const move = easeOut(at(850, 1450));
+  const icon = at(350, 750);
+  const move = easeOut(at(750, 1200));
   const iconX = ICON_START_X + (ICON_END_X - ICON_START_X) * move;
-  const reveal = at(1450, 2150);
-  const text = at(1450, 1750);
+  const reveal = at(1200, 1900);
+  const text = at(1200, 1500);
+  // 标题下方的小字与标题同时起步，走同一段曲线，只是不参与横向展开。
+  const subtext = at(1200, 1500);
   const overall = 1 - at(2450, 3000);
 
   return {
@@ -67,6 +85,7 @@ export function pamelaIntroState(elapsed, total = PAMELA_INTRO_MS) {
     iconX,
     textX: iconX + TEXT_GAP_X,
     text,
+    subtext,
     reveal,
     overall,
     done: t >= span,
@@ -125,7 +144,7 @@ export function drawPamelaIntro(ctx, size, state) {
   if (state.text > 0 && state.reveal > 0 && typeof ctx.measureText === "function") {
     ctx.save();
     ctx.globalAlpha *= state.text;
-    const fontSize = width * 0.0333;
+    const fontSize = width * TEXT_SIZE;
     ctx.font = `600 ${fontSize}px "JetBrains Mono", monospace`;
     ctx.textBaseline = "middle";
     const left = width * state.textX;
@@ -136,6 +155,21 @@ export function drawPamelaIntro(ctx, size, state) {
     ctx.fillStyle = "#ffffff";
     ctx.fillText(PAMELA_INTRO_TEXT, left, height / 2);
     ctx.restore();
+
+    // 标题下方的一行小字：不展开，只随标题一起渐显。
+    if (state.subtext > 0) {
+      ctx.save();
+      ctx.globalAlpha *= state.subtext;
+      ctx.font = `400 ${width * SUBTEXT_SIZE}px "JetBrains Mono", monospace`;
+      ctx.textBaseline = "middle";
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(
+        PAMELA_INTRO_SUBTEXT,
+        left,
+        height / 2 + fontSize * SUBTEXT_GAP_Y,
+      );
+      ctx.restore();
+    }
   }
 
   ctx.restore();

@@ -129,18 +129,30 @@ test("三维空间：坐标标准、单轴方法与示意图都在", () => {
     "x 平轴", "y 升轴", "z 推轴", "深度", "moveTo", "xTo", "yTo", "zTo",
     "H 平轴", "V 升轴", "D 推轴", "Horizontal", "Vertical", "Depth",
     "hTo", "vTo", "stage.perspective", "stage.guideline", "参考线",
-    "coordinate-system.svg",
+    "coordinate-system.svg", "stage-vertices.png", "舞台坐标与八个顶点位",
+    "画布像素坐标", "upleft", "见第三节",
   ]) {
     assert.ok(article.body.includes(phrase), `三维空间一文缺 ${phrase}`);
   }
   withFakeDom(() => {
     const root = renderMarkdown(article.body);
     const figures = root.findAll("reader__figure");
-    assert.equal(figures.length, 1, "示意图要渲染成一个 figure");
-    const image = root.findAll("reader__figure-image")[0];
-    assert.ok(image.src.startsWith("data:image/svg+xml"), "示意图内联成 data: URI");
-    assert.ok(!image.src.includes("help/"), "img 不再按路径去取文件");
-    assert.ok(figures[0].findAll("reader__figure-caption").length === 1, "图下有说明文字");
+    assert.equal(figures.length, 2, "三维坐标图与舞台坐标图各渲染成一个 figure");
+    const images = root.findAll("reader__figure-image");
+    assert.equal(images.length, 2);
+    for (const image of images) {
+      assert.ok(image.src.startsWith("data:image/"), "示意图内联成 data: URI");
+      assert.ok(!image.src.includes("help/"), "img 不再按路径去取文件");
+    }
+    assert.ok(images.some((image) => image.src.startsWith("data:image/png;base64,")), "位图是内联 PNG");
+    assert.equal(
+      images.filter((image) => image.classList.contains("reader__figure-image--wide")).length,
+      1,
+      "舞台坐标图占满正文宽度",
+    );
+    for (const figure of figures) {
+      assert.equal(figure.findAll("reader__figure-caption").length, 1, "每张图下都有说明文字");
+    }
   });
 });
 

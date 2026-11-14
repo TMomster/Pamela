@@ -282,9 +282,9 @@
   user-select: text;
 }
 
-/* A figure — the 三维空间 diagram — is a block image with a caption under it. The
-   diagram carries its own white background, so it is framed on a light plate and
-   centred; the caption stays on the article page below it. */
+/* A figure is a block image with a caption under it. Diagrams carry their own
+   white background, so they are framed on a light plate and centred; the caption
+   stays on the article page below it. */
 .reader__figure {
   margin: 0 0 18px;
   text-align: center;
@@ -299,6 +299,12 @@
   background: #ffffff;
   border: 1px solid var(--pamela-border);
   border-radius: 6px;
+}
+
+/* The stage-coordinate plate labels eight points: it needs the full article
+   width, not the 520px cap that suits the single 3D diagram. */
+.reader__figure-image--wide {
+  max-width: 100%;
 }
 
 .reader__figure-caption {

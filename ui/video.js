@@ -68,9 +68,9 @@ function multiplier(value, fallback, label, kind) {
   return parsed;
 }
 
-/** Playback rates the webview can actually honour. */
+/** 播放速率上下限：1 为原速，0.1–10.0 可调。 */
 function rate(value) {
-  return Math.min(16, Math.max(0.0625, value));
+  return Math.min(10, Math.max(0.1, value));
 }
 
 /**

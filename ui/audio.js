@@ -78,6 +78,15 @@ export function createAudioFactory({
   /** Reports a failure the way the rest of the stage does: one message. */
   const fail = (error) => onError(error instanceof Error ? error.message : String(error));
 
+  /** 播放速率上下限：1 为原速，0.1–10.0 可调（与 Video 一致）。 */
+  const clipRate = (value) => {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) {
+      return 1;
+    }
+    return Math.min(10, Math.max(0.1, parsed));
+  };
+
   /** Builds one sound; this is the function the interpreter calls as `Audio`. */
   const factory = (args, context) => {
     const path = typeof args[0] === "string" ? args[0].trim() : "";
@@ -122,6 +131,9 @@ export function createAudioFactory({
     /** The volume the script asked for, kept across fades. */
     let level = 1;
 
+    /** 播放速率：1 为原速，脚本可用 speed / speedTo 改。 */
+    let speed = 1;
+
     /**
      * Counts the starts and stops asked for, so a load that finishes late can
      * tell whether the script still wants it.
@@ -164,6 +176,16 @@ export function createAudioFactory({
     }
     element.volume = level;
 
+    /** 设置播放速率：`absolute` 为 true 时直接设成 `value`，否则在原速上相乘。 */
+    const setSpeed = (value, absolute) => {
+      const amount = Number(value);
+      if (!Number.isFinite(amount) || amount <= 0) {
+        throw new Error("Audio 的速度需要大于 0 的数字");
+      }
+      speed = clipRate(absolute ? amount : speed * amount);
+      element.playbackRate = speed;
+    };
+
     const sound = {
       // Which object this is, so a named argument can be matched to this
       // object's own method rather than to a same-named one elsewhere.
@@ -194,6 +216,7 @@ export function createAudioFactory({
               return;
             }
             element.currentTime = 0;
+            element.playbackRate = speed;
             element.volume = fadeIn > 0 ? 0 : level;
             const started = element.play();
             if (started && typeof started.catch === "function") {
@@ -245,6 +268,21 @@ export function createAudioFactory({
       /** Plays once and stops at the end: a sound effect. */
       once() {
         element.loop = false;
+        return sound;
+      },
+
+      /**
+       * 相对改变播放速率：`speed(2)` 在「当前速率 × 2」，1 为原速。
+       * 范围 0.1–10.0，超出部分夹取；支持实时变速（正在响的声音立即变调变速）。
+       */
+      speed(value, time = 0) {
+        setSpeed(value, false);
+        return sound;
+      },
+
+      /** 把播放速率设成 `value`：1 为原速，范围 0.1–10.0。 */
+      speedTo(value, time = 0) {
+        setSpeed(value, true);
         return sound;
       },
 

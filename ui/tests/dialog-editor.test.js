@@ -2,9 +2,11 @@
 // Tests for the Pamela dialogue designer.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { DEFAULT_STYLE, STYLE_SLOTS } from "../dialog.js";
+import { parse, tokenize } from "../pamela.js";
 import {
   BACKDROP_ID,
   DEFAULT_POLYGON_SIDES,
@@ -295,14 +297,14 @@ test("normalise survives whatever a broken file holds", () => {
   );
 });
 
-test("the default template gives each slot a plate worth stamping", () => {
+test("the default template gives each slot a white, pale-outlined plate", () => {
   const doc = createDefaultTemplate();
 
   assert.equal(doc.styles.dialog.stamp.path, "", "the caller decides where the plate goes");
   assert.deepEqual(
     doc.styles.dialog.layers.map((layer) => layer.name),
     ["底板", "姓名框"],
-    "a bar for the line and a smaller plate for the name",
+    "a bar for the line and one outlined capsule for the name",
   );
   assert.deepEqual(
     doc.styles.narration.layers.map((layer) => layer.name),
@@ -314,11 +316,22 @@ test("the default template gives each slot a plate worth stamping", () => {
     for (const plate of doc.styles[slot].layers) {
       assert.equal(plate.type, "rect");
       assert.ok(plate.width > 0 && plate.height > 0, "the plate covers area");
-      assert.ok(plate.opacity < 1, "the text stays readable through it");
+      assert.equal(plate.opacity, 1, "white plates stay white over any frame");
       assert.ok(plate.radius > 0, "the corners are rounded");
-      assert.ok(plate.stroke.width > 0, "the outline keeps it visible on a pale frame");
+      assert.ok(plate.stroke.width > 0, "the pale blue outline keeps it visible");
     }
+    assert.equal(doc.styles[slot].text.font.family, "Source Han Sans CN");
+    assert.equal(doc.styles[slot].speaker.font.family, "Source Han Sans CN");
   }
+
+  const [bar, plate] = doc.styles.dialog.layers;
+  assert.equal(bar.fill, "#ffffff");
+  assert.deepEqual(bar.stroke, { color: "#a8d4f5", width: 4 });
+  assert.equal(plate.fill, "#1f4e8c", "the deep blue capsule is the only name plate");
+  assert.deepEqual(plate.stroke, { color: "#a8d4f5", width: 4 }, "outlined like the bar");
+  assert.ok(plate.radius >= plate.height / 2, "the name plate is a capsule");
+  assert.equal(doc.styles.dialog.text.font.color, "#000000");
+  assert.equal(doc.styles.dialog.speaker.font.color, "#ffffff");
 });
 
 test("the default template puts the name on its plate and the line on the bar", () => {
@@ -337,6 +350,35 @@ test("the default template puts the name on its plate and the line on the bar", 
     inside(doc.styles.narration.text, doc.styles.narration.layers[0]),
     "the narrator's line sits on its own bar, which has no plate above it",
   );
+});
+
+test("a newly created project's starter style matches the built-in template", () => {
+  // `src/project.rs` writes a style file at creation time; the integrity check
+  // fills one in later with `createDefaultTemplate()`. A new project and an
+  // older, repaired one must not end up with different looking boxes.
+  const source = readFileSync(new URL("../../src/project.rs", import.meta.url), "utf8");
+  const match = source.match(/const DEFAULT_STYLE_SOURCE: &str = r##"([\s\S]*?)"##;/);
+  assert.ok(match, "the backend keeps a starter style template");
+  const starter = JSON.parse(match[1]);
+
+  // Layer ids are generated per run in the designer and fixed in the backend;
+  // everything else — including the order that decides what is drawn on top —
+  // has to agree exactly.
+  const withoutIds = (doc) =>
+    JSON.stringify(doc, (key, value) => (key === "id" ? undefined : value));
+  assert.equal(withoutIds(starter), withoutIds(createDefaultTemplate()));
+});
+
+test("the starter script a new project opens is valid Pamela", () => {
+  const source = readFileSync(new URL("../../src/project.rs", import.meta.url), "utf8");
+  const match = source.match(/const DEFAULT_SCRIPT_SOURCE: &str = r#"([\s\S]*?)"#;/);
+  assert.ok(match, "the backend keeps a starter script");
+
+  const scanned = tokenize(match[1]);
+  assert.equal(scanned.error, undefined);
+  const parsed = parse(scanned.tokens);
+  assert.equal(parsed.error, undefined);
+  assert.ok(parsed.program.statements.length >= 2, "a narration and a named line both run");
 });
 
 test("two default templates share nothing, layers included", () => {
@@ -372,7 +414,7 @@ test("copying a style over the other slot is a deep copy", () => {
   // vertices or its font would look like two styles and behave as one.
   copy.layers[0].fill = "#00ff00";
   copy.speaker.font.size = 11;
-  assert.equal(source.layers[0].fill, "#000000");
+  assert.equal(source.layers[0].fill, "#ffffff");
   assert.equal(source.speaker.font.size, 55);
 
   // A slot copied onto itself is not a copy of anything, and neither is one

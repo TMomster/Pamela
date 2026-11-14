@@ -831,7 +831,7 @@ test("the method list follows the object's type", () => {
   assert.ok(!methodsFor(bg).includes("front"), "a background has no layer order");
   assert.ok(methodsFor(ch).includes("front"));
   assert.ok(!methodsFor(ch).includes("crossFade"));
-  assert.deepEqual(methodsFor(au), ["play", "stop", "loop", "once", "volume", "duration"]);
+  assert.deepEqual(methodsFor(au), ["play", "stop", "loop", "once", "volume", "duration", "speed", "speedTo"]);
   // Unconnected: everything, so the node can be placed before it is wired.
   assert.ok(methodsFor(null).includes("enable"));
   assert.ok(methodsFor(null).includes("play"));
@@ -854,7 +854,7 @@ test("a type gets every method the API table gives it, not a stale hand list", (
 
 test("a call node's method list comes from the type its variable is built with", () => {
   const { graph, call } = scene({ type: "TypeAudio", typeParams: { file: "a.mp3" } });
-  assert.deepEqual(methodsFor(call, graph), ["play", "stop", "loop", "once", "volume", "duration"]);
+  assert.deepEqual(methodsFor(call, graph), ["play", "stop", "loop", "once", "volume", "duration", "speed", "speedTo"]);
 });
 
 test("a 新对象 has one 赋值 out; a type node one 赋值 in and no way out", () => {

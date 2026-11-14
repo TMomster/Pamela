@@ -56,12 +56,119 @@ pub const DEFAULT_STYLE_FILE: &str = "default.dialog.json";
 /// 项目尚无剧本时写入的默认剧本。
 const DEFAULT_SCRIPT_FILE: &str = "main.pe";
 
-/// 默认剧本内容取可运行的最小集合，使新建项目可直接启动。
-const DEFAULT_SCRIPT_SOURCE: &str = r#"# Pamela — 默认脚本。
+/// 新建项目写入的初始剧本。既可直接试跑，也把新手要找的三处入口写在注释里：
+/// 台词在这里改、样式在 `templates/` 改、完整语法在软件的「帮助」里。
+const DEFAULT_SCRIPT_SOURCE: &str = r#"# Pamela — 从这里开始写你的故事。
+# 这是项目的初始剧本 scripts/main.pe，台词就改这个文件。
 # 按 Ctrl+Enter（演出 → 运行当前脚本）试跑。
 
-say("这是项目里的第一个脚本。")
+# 旁白：一行一句，不带姓名。
+say("夜色落下，故事从这里开始。")
+
+# 角色台词：第二个参数写姓名，姓名框会自动出现。
+dialog.say("你好，我是帕梅拉。", "帕梅拉")
+
+# 想改对话框的样式？在资源树里双击 templates/default.dialog.json，
+# 就能用可视化设计器调整颜色、圆角、描边、字体和姓名框。
+# 做好第二套样式后，可以用 use("templates/另一个样式.dialog.json") 切换。
+
+# 更多写法（角色、背景、音乐、选择支等）见软件内「帮助」。
+#   hero = Character("hero.png", name = "帕梅拉")
+#   hero.say("把立绘和姓名绑在一起。")
 "#;
+
+/// 新建项目写入的初始对白样式模板。
+///
+/// 白色圆角底板 + 淡蓝描边 + 黑色台词；姓名框是一枚深蓝胶囊加同样的淡蓝描边，
+/// 姓名用白字。四个文本块统一使用随软件分发的思源黑体（字体名
+/// `Source Han Sans CN`）。此常量需与 `ui/dialog-editor.js` 的
+/// `createDefaultTemplate()` 保持一致：前者给新建项目，后者给「检查资源完整性」
+/// 补齐样式文件的旧项目。
+const DEFAULT_STYLE_SOURCE: &str = r##"{
+  "version": 2,
+  "canvas": { "width": 1920, "height": 1080 },
+  "active": "dialog",
+  "styles": {
+    "dialog": {
+      "stamp": { "path": "" },
+      "layers": [
+        {
+          "id": "dialog-box",
+          "name": "底板",
+          "type": "rect",
+          "visible": true,
+          "opacity": 1,
+          "x": 140,
+          "y": 800,
+          "width": 1640,
+          "height": 240,
+          "rotation": 0,
+          "fill": "#ffffff",
+          "radius": 28,
+          "stroke": { "color": "#a8d4f5", "width": 4 }
+        },
+        {
+          "id": "dialog-name-plate",
+          "name": "姓名框",
+          "type": "rect",
+          "visible": true,
+          "opacity": 1,
+          "x": 176,
+          "y": 744,
+          "width": 380,
+          "height": 84,
+          "rotation": 0,
+          "fill": "#1f4e8c",
+          "radius": 42,
+          "stroke": { "color": "#a8d4f5", "width": 4 }
+        }
+      ],
+      "speaker": {
+        "x": 196, "y": 756, "width": 340, "height": 60,
+        "font": { "family": "Source Han Sans CN", "size": 40, "weight": 700, "italic": false, "color": "#ffffff" },
+        "align": "center", "valign": "middle"
+      },
+      "text": {
+        "x": 196, "y": 872, "width": 1520, "height": 144,
+        "font": { "family": "Source Han Sans CN", "size": 36, "weight": 400, "italic": false, "color": "#000000" },
+        "lineHeight": 1.5, "align": "left", "valign": "top",
+        "overflow": "shrink", "typeSpeed": 0
+      }
+    },
+    "narration": {
+      "stamp": { "path": "" },
+      "layers": [
+        {
+          "id": "narration-box",
+          "name": "底板",
+          "type": "rect",
+          "visible": true,
+          "opacity": 1,
+          "x": 140,
+          "y": 800,
+          "width": 1640,
+          "height": 240,
+          "rotation": 0,
+          "fill": "#ffffff",
+          "radius": 28,
+          "stroke": { "color": "#a8d4f5", "width": 4 }
+        }
+      ],
+      "speaker": {
+        "x": 196, "y": 756, "width": 340, "height": 60,
+        "font": { "family": "Source Han Sans CN", "size": 40, "weight": 700, "italic": false, "color": "#ffffff" },
+        "align": "center", "valign": "middle"
+      },
+      "text": {
+        "x": 196, "y": 872, "width": 1520, "height": 144,
+        "font": { "family": "Source Han Sans CN", "size": 36, "weight": 400, "italic": false, "color": "#000000" },
+        "lineHeight": 1.5, "align": "left", "valign": "top",
+        "overflow": "shrink", "typeSpeed": 0
+      }
+    }
+  }
+}
+"##;
 
 /// `pamela.json` 清单的数据结构。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,7 +263,18 @@ pub fn create(parent: &Path, name: &str) -> io::Result<Project> {
         fs::create_dir_all(root.join(ASSETS_DIR).join(sub))?;
     }
 
-    // 先写入样式文件名，样式文件本身由前端随后填充。
+    // 初始剧本与初始样式一起落盘：新建项目一打开，资源树里就有可以直接编辑
+    // 的两个文件，新手不必先跑一次「检查资源完整性」才知道去哪里下手。
+    crate::files::atomic_write(
+        &root.join(SCRIPTS_DIR).join(DEFAULT_SCRIPT_FILE),
+        DEFAULT_SCRIPT_SOURCE.as_bytes(),
+    )?;
+    crate::files::atomic_write(
+        &root.join(TEMPLATES_DIR).join(DEFAULT_STYLE_FILE),
+        DEFAULT_STYLE_SOURCE.as_bytes(),
+    )?;
+
+    // 清单的 style 指向上面刚写好的样式文件，舞台第一次演出就能用到它。
     let manifest = Manifest {
         version: 1,
         name: trimmed.to_string(),
@@ -670,6 +788,32 @@ mod tests {
         assert!(!manifest.is_dir);
         assert!(!manifest.is_script, "the manifest is not a script");
 
+        // 两个初始文件随项目一起落盘，新手一打开资源树就知道该编辑哪里。
+        let script = Path::new(&project.root)
+            .join(SCRIPTS_DIR)
+            .join(DEFAULT_SCRIPT_FILE);
+        let style = Path::new(&project.root)
+            .join(TEMPLATES_DIR)
+            .join(DEFAULT_STYLE_FILE);
+        assert!(script.is_file(), "scripts/main.pe is written");
+        assert!(style.is_file(), "templates/default.dialog.json is written");
+        assert!(
+            fs::read_to_string(&script).unwrap().contains("dialog.say("),
+            "the starter shows how a named line is written"
+        );
+        let template: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&style).unwrap()).unwrap();
+        assert_eq!(
+            template["styles"]["dialog"]["layers"].as_array().unwrap().len(),
+            2,
+            "a white bar plus one outlined capsule"
+        );
+        assert_eq!(
+            template["styles"]["dialog"]["text"]["font"]["family"],
+            "Source Han Sans CN"
+        );
+        assert_eq!(project.style, format!("{TEMPLATES_DIR}/{DEFAULT_STYLE_FILE}"));
+
         fs::remove_dir_all(&temp).unwrap();
     }
 
@@ -871,8 +1015,12 @@ mod tests {
         assert_eq!(report.project.style, report.style);
         assert_eq!(report.project.name, "demo");
 
-        // 未写入任何本已存在的内容。
-        assert!(!root.join(SCRIPTS_DIR).join(DEFAULT_SCRIPT_FILE).exists());
+        // 新建项目自带的初始剧本不被检查覆盖。
+        assert!(root.join(SCRIPTS_DIR).join(DEFAULT_SCRIPT_FILE).is_file());
+        assert_eq!(
+            fs::read_to_string(root.join(SCRIPTS_DIR).join(DEFAULT_SCRIPT_FILE)).unwrap(),
+            DEFAULT_SCRIPT_SOURCE
+        );
 
         fs::remove_dir_all(&temp).unwrap();
     }
@@ -930,7 +1078,9 @@ mod tests {
         let project = create(&temp, "demo").unwrap();
         let root = PathBuf::from(&project.root);
 
-        // `create` 会建立目录与清单，但不创建剧本与样式文件。
+        // 模拟既没有初始剧本、也没有任何样式文件的旧项目。
+        fs::remove_file(root.join(SCRIPTS_DIR).join(DEFAULT_SCRIPT_FILE)).unwrap();
+        fs::remove_file(root.join(TEMPLATES_DIR).join(DEFAULT_STYLE_FILE)).unwrap();
         let report = check(&root, "demo").unwrap();
 
         assert!(report.needs_template);
@@ -966,6 +1116,8 @@ mod tests {
         let project = create(&temp, "demo").unwrap();
         let root = PathBuf::from(&project.root);
 
+        // 移走新建项目自带的默认样式，让清单指向一个确实不存在的文件。
+        fs::remove_file(root.join(TEMPLATES_DIR).join(DEFAULT_STYLE_FILE)).unwrap();
         // 样式文件里的 layers 就是底板，检查阶段无需核对任何 PNG。
         fs::write(
             root.join(TEMPLATES_DIR).join("a.dialog.json"),

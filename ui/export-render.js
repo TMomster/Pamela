@@ -13,7 +13,7 @@ import { axesOf, paintAxes } from "./axes.js";
 import { draw as drawPlate, hasPlate, styleFor } from "./dialog-plate.js";
 import { createEffectLayer } from "./export-effect.js";
 import { paintGuideline } from "./guideline.js";
-import { drawPamelaIntro, pamelaIntroState } from "./pamela-intro.js";
+import { PAMELA_INTRO_MS, drawPamelaIntro, pamelaIntroState } from "./pamela-intro.js";
 import {
   CAMERA_DISTANCE,
   CORNERS,
@@ -1335,7 +1335,7 @@ export function createCanvasRenderer({
       drawPamelaIntro(
         ctx,
         { width, height },
-        pamelaIntroState(t - (Number(intro.start) || 0), Number(intro.total) || 3000),
+        pamelaIntroState(t - (Number(intro.start) || 0), Number(intro.total) || PAMELA_INTRO_MS),
       );
     }
     ctx.restore();

@@ -13,6 +13,7 @@ import {
   DEFAULT_RECORDING,
   holdFor,
 } from "../export-stage.js";
+import { PAMELA_INTRO_MS } from "../pamela-intro.js";
 
 function harness() {
   const clock = createVirtualClock();
@@ -39,7 +40,7 @@ test("the recording globals have the shape the interpreter expects", () => {
   assert.equal(typeof built.dialog.say, "function");
 });
 
-test("stage.pamela() records a full three-second intro, not just a jump in time", () => {
+test("stage.pamela() records a full intro, not just a jump in time", () => {
   const { clock, timeline, globals } = harness();
   const context = { pending: [] };
   const { stage } = globals(context);
@@ -50,10 +51,10 @@ test("stage.pamela() records a full three-second intro, not just a jump in time"
   const during = stateAt(timeline, 1500).pamelaIntro;
   assert.equal(during.active, true);
   assert.equal(during.start, 0);
-  assert.equal(during.total, 3000);
-  assert.equal(stateAt(timeline, 3000).pamelaIntro.active, false, "到点撤掉覆盖层");
-  clock.tickMs(3000);
-  assert.equal(clock.now(), 3000, "成片里照常占用 3 秒");
+  assert.equal(during.total, PAMELA_INTRO_MS);
+  assert.equal(stateAt(timeline, PAMELA_INTRO_MS).pamelaIntro.active, false, "到点撤掉覆盖层");
+  clock.tickMs(PAMELA_INTRO_MS);
+  assert.equal(clock.now(), PAMELA_INTRO_MS, "成片里照常占用整段动画的时间");
 });
 
 test("Effect objects write particle state instead of a picture layer", () => {

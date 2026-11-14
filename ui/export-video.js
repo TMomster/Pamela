@@ -13,9 +13,9 @@
 // - 画面轨的 play / pause 也动播放头，因为声音跟着同一个元素走；
 // - speed / volume 带时间参数时，舞台会等这段时间走完，导出同样等待。
 
-/** 与 `video.js` 的 rate() 相同的上下限：webview 能接受的播放速率。 */
-const MIN_RATE = 0.0625;
-const MAX_RATE = 16;
+/** 与 `video.js` 的 rate() 相同的上下限：1 为原速，0.1–10.0 可调。 */
+const MIN_RATE = 0.1;
+const MAX_RATE = 10;
 
 function clamp01(value) {
   return Math.min(1, Math.max(0, value));

@@ -3,10 +3,13 @@
 //
 // 图不按路径取：整张图写在这个文件里，`renderMarkdown` 把它换成 data: URI 交给
 // <img>，所以装好的软件里没有 help/ 文件夹也照常显示，移动安装目录同样不影响。
-// `ui/coordinate-system.svg` 只是出图给文档用的源文件，运行时不读它 —— 两份内容
-// 由 `ui/tests/help-figures.test.js` 比对，改了一边忘了另一边会让测试红。
+// 矢量图是 `ui/*.svg` 的内联源码，位图是 `ui/*.png` 编进 `*-image.js` 的 base64；
+// 源文件只是出图留档，运行时都不读，两者由 `ui/tests/help-figures.test.js` 比对，
+// 改了一边忘了另一边会让测试红。
 //
-// 再加一张图：把 SVG 源码整段贴进 FIGURES，Markdown 里照写 `![说明](文件名)`。
+// 再加一张图：把源码贴进 FIGURES（SVG）或 BITMAPS（PNG），Markdown 里照写
+// `![说明](文件名)`。
+import { STAGE_VERTICES_PNG } from "./stage-vertices-image.js";
 
 const COORDINATE_SYSTEM = `<svg xmlns="http://www.w3.org/2000/svg" width="900" height="800" viewBox="0 0 900 800">
   <!-- 业界传统三轴配色：x 红(#ef4444)、y 绿(#22c55e)、z 蓝(#3b82f6)；
@@ -96,6 +99,11 @@ const FIGURES = Object.freeze({
   "coordinate-system.svg": COORDINATE_SYSTEM,
 });
 
+/** 文件名 → 位图的 base64。PNG 同样编进软件，不按路径寻址。 */
+const BITMAPS = Object.freeze({
+  "stage-vertices.png": STAGE_VERTICES_PNG,
+});
+
 /** 地址只取文件名：`../help/coordinate-system.svg` 与 `coordinate-system.svg` 等价。 */
 function figureName(src) {
   return String(src ?? "").split(/[\\/]/).pop() ?? "";
@@ -111,11 +119,16 @@ function figureName(src) {
  * @returns {string} data: URI；没有这张图时返回空串，调用方保留原地址。
  */
 export function figureSource(src) {
-  const svg = FIGURES[figureName(src)];
-  if (!svg) {
-    return "";
+  const name = figureName(src);
+  const svg = FIGURES[name];
+  if (svg) {
+    return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
   }
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  const png = BITMAPS[name];
+  if (png) {
+    return `data:image/png;base64,${png}`;
+  }
+  return "";
 }
 
 /**

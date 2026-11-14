@@ -350,6 +350,8 @@ const AUDIO_METHODS = [
   { label: "loop", detail: "() 循环播放：背景音乐" },
   { label: "once", detail: "() 只播一次：音效" },
   { label: "play", detail: "(time?) 从头播放，可淡入；不阻塞" },
+  { label: "speed", detail: "(倍率, time?) 相对改变播放速率，1 为原速，范围 0.1–10.0" },
+  { label: "speedTo", detail: "(倍率, time?) 设置播放速率，1.0 为原速，范围 0.1–10.0" },
   { label: "stop", detail: "(time?) 停止，可淡出；不阻塞" },
   { label: "volume", detail: "(0–1, time?) 设置音量，可渐变" },
 ];
@@ -627,7 +629,7 @@ export const COMPLETIONS = [
       { label: "click", detail: "(time?) 创建点击位置并等待：非自动模式等点击，自动/导出模式等 time 毫秒" },
       { label: "auto", detail: "(time?) 无点击位置的计时等待，用于控制自动模式的等待时长" },
       { label: "autoVoice", detail: "(开/速度?) 自动配音：没有显式 audio 的 say 自动配一段合成音；0 或 false 关闭" },
-      { label: "pamela", detail: "() 播放约 3 秒的 Pamela 开场动画：黑幕淡入、图标左移、展开 Made with Pamela、整体淡出" },
+      { label: "pamela", detail: "() 播放约 3.5 秒的 Pamela 开场动画：黑幕淡入、图标左移、展开 Made with Pamela 并渐显项目地址、整体淡出" },
       // The stage speaks for a set of objects: one line sets up the whole
       // scene instead of repeating the call per character. The objects go after
       // a colon when the fixed parameters are cut short — `stage.scale(2.0 : ch, bg)`.

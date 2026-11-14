@@ -2403,9 +2403,10 @@ let runCount = 0;
  * the author knows which one it is on. A project naming none is on the runtime's
  * built-in defaults.
  *
- * A file that is not there yet is not reported: a new project names the default
- * style before the integrity check has written it, so every first run would nag
- * about a state that the check is the thing to fix. A missing file simply means
+ * A file that is not there yet is not reported: an older project may still name
+ * the default style before the integrity check has written it, so every first
+ * run would nag about a state that the check is the thing to fix. A newly
+ * created project already carries its style file. A missing file simply means
  * the runtime falls back to its built-in defaults.
  *
  * The style is set even when none could be read, because the stage outlives the

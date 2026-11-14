@@ -187,7 +187,7 @@ test("a sound answers a dot with its own calls", () => {
   const found = suggest(source, source.length);
   assert.deepEqual(
     found.items.map((item) => item.label),
-    ["duration", "loop", "once", "play", "stop", "volume"],
+    ["duration", "loop", "once", "play", "speed", "speedTo", "stop", "volume"],
   );
 });
 

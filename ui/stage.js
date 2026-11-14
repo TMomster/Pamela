@@ -3411,9 +3411,10 @@ export function createStageGlobals(stage, objects = createStageObjects(stage)) {
         return stageApi;
       },
       /**
-       * 播放约 3 秒的 Pamela 开场动画：黑幕淡入、图标淡入并左移、右侧展开
-       * 「Made with Pamela」，最后整幅淡出。写在剧本哪一行就在哪一行播放，
-       * 不写就没有；回放与预览按 `duration()` 的惯例立即落终态。
+       * 播放约 3.5 秒的 Pamela 开场动画：黑幕淡入、图标淡入并左移、右侧展开
+       * 「Made with Pamela」并在其下方渐显 `github.com/tmomster/pamela`，
+       * 最后整幅淡出。写在剧本哪一行就在哪一行播放，不写就没有；回放与预览按
+       * `duration()` 的惯例立即落终态。
        */
       pamela() {
         context.pending?.push(stage.pamelaIntro?.());
@@ -7034,7 +7035,7 @@ export function createStage({
     clickWait: (time) => box.clickWait(time),
     /** `stage.auto(time)` 的演出端：无标记的纯计时等待。 */
     autoWait: (time) => settled(time),
-    /** `stage.pamela()` 的演出端：约 3 秒的开场动画，回放与预览时立即落终态。 */
+    /** `stage.pamela()` 的演出端：约 3.5 秒的开场动画，回放与预览时立即落终态。 */
     pamelaIntro,
     /** Replaces the dialogue style; the default is used until then. */
     setDialogueStyle: box.setStyle,

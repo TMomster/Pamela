@@ -34,6 +34,15 @@ export const AAC_FRAME_SAMPLES = 1024;
 /** 编码时每次喂给 AudioEncoder 的采样点数（100 ms @48 kHz）。 */
 const FEED_BLOCK = 4_800;
 
+/** 播放速率上下限：1 为原速，0.1–10.0（与 stage 的 Audio 一致）。 */
+function clipRate(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return 1;
+  }
+  return Math.min(10, Math.max(0.1, parsed));
+}
+
 function asMs(value) {
   const ms = Number(value);
   return Number.isFinite(ms) && ms > 0 ? ms : 0;
@@ -106,6 +115,24 @@ export function createAudioRecorder({ clock, onError = () => {} } = {}) {
           value: Math.min(1, Math.max(0, wanted)),
           fadeMs: asMs(time),
         });
+        return record;
+      },
+      /** 相对改变播放速率：`speed(2)` 在「当前速率 × 2」；1 为原速。 */
+      speed(value, time = 0) {
+        const amount = Number(value);
+        if (!Number.isFinite(amount) || amount <= 0) {
+          throw new Error("Audio 的速度需要大于 0 的数字");
+        }
+        events.push({ kind: "rate", id, at: clock.now(), value: amount, absolute: false });
+        return record;
+      },
+      /** 把播放速率设成 `value`：1 为原速，范围 0.1–10.0。 */
+      speedTo(value, time = 0) {
+        const amount = Number(value);
+        if (!Number.isFinite(amount) || amount <= 0) {
+          throw new Error("Audio 的速度需要大于 0 的数字");
+        }
+        events.push({ kind: "rate", id, at: clock.now(), value: amount, absolute: true });
         return record;
       },
       /**
@@ -196,6 +223,7 @@ export function planAudio({ events = [], sounds = new Map() } = {}) {
       continue;
     }
     let level = sound.volume;
+    let rate = 1;
     let open = null;
     let loop = Boolean(sound.loop);
 
@@ -221,9 +249,12 @@ export function planAudio({ events = [], sounds = new Map() } = {}) {
         open = {
           id,
           path: sound.path,
+          kind: "Audio",
           startMs: event.at,
           stopMs: null,
           loop,
+          rate,
+          offsetMs: 0,
           gain: points,
         };
       } else if (event.kind === "stop") {
@@ -253,6 +284,28 @@ export function planAudio({ events = [], sounds = new Map() } = {}) {
           }
         }
         level = event.value;
+      } else if (event.kind === "rate") {
+        // 切速时把当前段收尾，并从「已消耗的素材位置」接上一段新速率的段；
+        // 没在响时只改下次 play 的起始速率（与 Video 的切速一致）。
+        const amount = Number(event.value);
+        const target = clipRate(event.absolute ? amount : rate * amount);
+        if (open) {
+          const consumed = (event.at - open.startMs) * open.rate;
+          open.stopMs = event.at;
+          voices.push(open);
+          open = {
+            id,
+            path: sound.path,
+            kind: "Audio",
+            startMs: event.at,
+            stopMs: null,
+            loop,
+            rate: target,
+            offsetMs: Math.max(0, consumed),
+            gain: [{ at: event.at, value: level }],
+          };
+        }
+        rate = target;
       } else if (event.kind === "loop" || event.kind === "once") {
         loop = Boolean(event.value);
         if (open) {
@@ -428,7 +481,7 @@ export async function renderAudio({
     const offsetMs = Math.max(0, Number(voice.offsetMs) || 0);
     const mediaSeconds = buffer.duration || 0;
     let offsetSeconds = offsetMs / 1000;
-    if (voice.kind === "Video") {
+    if (voice.kind === "Video" || voice.kind === "Audio") {
       if (voice.loop && mediaSeconds > 0) {
         offsetSeconds %= mediaSeconds;
       } else if (mediaSeconds > 0) {
@@ -438,9 +491,9 @@ export async function renderAudio({
     const source = context.createBufferSource();
     source.buffer = buffer;
     source.loop = Boolean(voice.loop);
-    if (voice.kind === "Video" && source.playbackRate) {
-      const rate = Number(voice.rate);
-      source.playbackRate.value = Number.isFinite(rate) && rate > 0 ? rate : 1;
+    if (source.playbackRate) {
+      const frameRate = Number(voice.rate);
+      source.playbackRate.value = Number.isFinite(frameRate) && frameRate > 0 ? frameRate : 1;
     }
     const gain = context.createGain();
     applyGain(gain.gain, voice.gain);

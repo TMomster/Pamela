@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createExportMetrics } from "../export-metrics.js";
+import { PAMELA_INTRO_MS, PAMELA_INTRO_SUBTEXT } from "../pamela-intro.js";
 import {
   createCanvasRenderer,
   fitRect,
@@ -46,10 +47,10 @@ test("without perspective a picture keeps its size at any depth", () => {
   assert.equal(scale[1], 1);
 });
 
-test("stage.pamela() paints the black cover and the title during the three seconds", () => {
+test("stage.pamela() paints the black cover and both lines of the curtain", () => {
   const { calls, canvas } = fakeCanvas();
   const renderer = createCanvasRenderer({ canvas, assets: new Map() });
-  renderer.render({ pamelaIntro: { active: true, start: 0, total: 3000 } }, 2200);
+  renderer.render({ pamelaIntro: { active: true, start: 0, total: PAMELA_INTRO_MS } }, 2600);
   assert.ok(
     calls.some((call) => call[0] === "fillRect" && call[3] === canvas.width && call[4] === canvas.height),
     "黑幕盖住整个镜头",
@@ -57,6 +58,10 @@ test("stage.pamela() paints the black cover and the title during the three secon
   assert.ok(
     calls.some((call) => call[0] === "fillText" && call[1] === "Made with Pamela"),
     "成片里也有 Made with Pamela",
+  );
+  assert.ok(
+    calls.some((call) => call[0] === "fillText" && call[1] === PAMELA_INTRO_SUBTEXT),
+    "成片里也有标题下的小字",
   );
 });
 

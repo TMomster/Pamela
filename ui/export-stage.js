@@ -154,8 +154,8 @@ export function createRecordingStage({
       return clock.wait(Number(time) || 0);
     },
     /**
-     * `stage.pamela()` 在成片里照常占 3 秒：时间线记下开始时刻，逐帧渲染按
-     * 同一份 `pamelaIntroState()` 把黑幕、图标与文字画上去，到点再登记关闭。
+     * `stage.pamela()` 在成片里照常占满整段动画：时间线记下开始时刻，逐帧渲染
+     * 按同一份 `pamelaIntroState()` 把黑幕、图标与两行文字画上去，到点再登记关闭。
      * 预览 / 读档回放走的是真舞台，不进这条录制路径。
      */
     pamelaIntro() {

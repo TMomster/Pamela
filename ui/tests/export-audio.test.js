@@ -106,9 +106,12 @@ test("planAudio turns play / volume / stop into one segment with a gain curve", 
   assert.deepEqual(voices[0], {
     id: "sound-1",
     path: "bgm.mp3",
+    kind: "Audio",
     startMs: 0,
     stopMs: 5000,
     loop: true,
+    rate: 1,
+    offsetMs: 0,
     gain: [
       { at: 0, value: 0 },
       { at: 500, value: 0.4 },
@@ -150,6 +153,25 @@ test("loop() and once() switch the segment while it is playing", () => {
   // 每个 loop/once 事件都会改写当前段的循环标记，最后一个是 once。
   assert.equal(voices.length, 1);
   assert.equal(voices[0].loop, false);
+});
+
+test("speed / speedTo change the segment's playback rate and split it", () => {
+  const clock = createVirtualClock();
+  const recorder = createAudioRecorder({ clock });
+  const bgm = recorder.audio(["bgm.mp3"], {});
+  bgm.play();
+  clock.tickMs(1000);
+  bgm.speedTo(2);
+  clock.tickMs(1000);
+  bgm.speed(0.5);
+
+  const { voices } = planAudio(recorder);
+  assert.equal(voices.length, 3);
+  assert.equal(voices[0].rate, 1);
+  assert.equal(voices[1].rate, 2);
+  assert.equal(voices[2].rate, 1); // 2 * 0.5
+  assert.equal(voices[1].offsetMs, 1000); // (1000 - 0) * 1
+  assert.equal(voices[2].offsetMs, 2000); // (2000 - 1000) * 2
 });
 
 test("a sound that never plays contributes no segment", () => {

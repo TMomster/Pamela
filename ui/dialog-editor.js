@@ -238,14 +238,71 @@ export function createDocument() {
 }
 
 /**
- * The plates a built-in style lays its text over: a wide bar for the line, and
- * — when `namePlate` — a smaller plate straddling its top edge for the name.
+ * The palette the built-in template is drawn in. A white box with a pale blue
+ * outline and black text; the name plate is one deep blue capsule with the same
+ * outline. Kept in step with `DEFAULT_STYLE_SOURCE` in `src/project.rs`, which
+ * is what a newly created project writes to disk.
+ */
+const TEMPLATE_COLORS = Object.freeze({
+  white: "#ffffff",
+  paleBlue: "#a8d4f5",
+  deepBlue: "#1f4e8c",
+  black: "#000000",
+});
+
+/** 思源黑体：随软件分发的字体名，模板里每个文本块都用它。 */
+const TEMPLATE_FONT_FAMILY = "Source Han Sans CN";
+
+/** Both text blocks of a slot, set in the bundled face with the template's ink. */
+function defaultTextBlocks(style) {
+  return {
+    speaker: {
+      ...style.speaker,
+      x: 196,
+      y: 756,
+      width: 340,
+      height: 60,
+      font: {
+        ...style.speaker.font,
+        family: TEMPLATE_FONT_FAMILY,
+        size: 40,
+        weight: 700,
+        color: TEMPLATE_COLORS.white,
+      },
+      align: "center",
+      valign: "middle",
+    },
+    text: {
+      ...style.text,
+      x: 196,
+      y: 872,
+      width: 1520,
+      height: 144,
+      font: {
+        ...style.text.font,
+        family: TEMPLATE_FONT_FAMILY,
+        size: 36,
+        weight: 400,
+        color: TEMPLATE_COLORS.black,
+      },
+      lineHeight: 1.5,
+      align: "left",
+      valign: "top",
+    },
+  };
+}
+
+/**
+ * The plates a built-in style lays its text over: a wide white rounded bar for
+ * the line, and — when `namePlate` — one deep blue capsule straddling its top
+ * edge for the name.
  *
- * The plates are what give a template its box. A style with no layers would
- * leave the dialogue text sitting on whatever the stage happens to show behind
- * it, so the runtime falls back to a plain bar. Both are rounded off and
- * outlined, so the pair still reads over a background of any brightness. A
- * narration box shows no name, so it is built without the name plate.
+ * A style with no layers would leave the dialogue text sitting on whatever the
+ * stage happens to show behind it, so the runtime falls back to a plain bar.
+ * The bar is opaque white with a pale blue outline, so black text stays
+ * readable over a frame of any brightness. The name plate carries that same
+ * outline rather than a second, offset capsule. A narration box shows no name,
+ * so it is built without the capsule.
  */
 function defaultPlateLayers(namePlate) {
   const layers = [
@@ -254,33 +311,35 @@ function defaultPlateLayers(namePlate) {
       name: "底板",
       type: "rect",
       visible: true,
-      opacity: 0.55,
+      opacity: 1,
       x: 140,
       y: 800,
       width: 1640,
       height: 240,
       rotation: 0,
-      fill: "#000000",
-      radius: 24,
-      stroke: { color: "#ffffff", width: 3 },
+      fill: TEMPLATE_COLORS.white,
+      radius: 28,
+      stroke: { color: TEMPLATE_COLORS.paleBlue, width: 4 },
     },
   ];
   if (namePlate) {
-    // Drawn after the bar, so where the two overlap the name plate is on top.
+    // A radius of half the height makes a capsule. Its pale blue stroke is the
+    // same one the bar uses, so the two boxes read as a pair without needing a
+    // second, offset capsule underneath. Drawn after the bar, it sits on top.
     layers.push({
       id: makeId(),
       name: "姓名框",
       type: "rect",
       visible: true,
-      opacity: 0.72,
+      opacity: 1,
       x: 176,
       y: 744,
-      width: 400,
-      height: 88,
+      width: 380,
+      height: 84,
       rotation: 0,
-      fill: "#000000",
-      radius: 16,
-      stroke: { color: "#ffffff", width: 3 },
+      fill: TEMPLATE_COLORS.deepBlue,
+      radius: 42,
+      stroke: { color: TEMPLATE_COLORS.paleBlue, width: 4 },
     });
   }
   return layers;
@@ -290,9 +349,9 @@ function defaultPlateLayers(namePlate) {
  * The style a slot is given when nothing says otherwise: the runtime's defaults
  * plus a plate to lay the text over.
  *
- * The text blocks move onto the plates — the name inside the small one, the
- * line inside the bar. Kept here rather than in the runtime's defaults, which
- * stay where a style-less dialogue would put them.
+ * The text blocks move onto the plates — the white name inside the deep blue
+ * capsule, the black line inside the white bar. Kept here rather than in the
+ * runtime's defaults, which stay where a style-less dialogue would put them.
  *
  * @param {"dialog" | "narration"} [slot]
  * @returns {object} A style set whose layers the runtime draws as its plate.
@@ -300,8 +359,7 @@ function defaultPlateLayers(namePlate) {
 export function createDefaultStyle(slot = "dialog") {
   const style = createStyleSet();
   style.layers = defaultPlateLayers(slot !== "narration");
-  style.speaker = { ...style.speaker, x: 196, y: 756, width: 360, height: 64 };
-  style.text = { ...style.text, x: 196, y: 872, width: 1520, height: 144 };
+  Object.assign(style, defaultTextBlocks(style));
   return style;
 }
 
