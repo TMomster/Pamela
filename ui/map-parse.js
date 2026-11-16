@@ -7,8 +7,9 @@
 // 反解成节点图。
 // The reverse parser is the inverse of `inferGraph`: the behaviour nodes, the
 // call nodes and the constructor types are exactly the ones the canvas emits, so
-// a parsed script re-infers to the same lines (no lost statements, no `#`
-// comments).
+// a parsed script re-infers to the same lines (no lost statements, no `//`
+// comments). A `#` debug command is not a comment: it is kept as a line of its
+// own, so the round trip leaves it where the author wrote it.
 import { NODE_TYPES } from "./graph-editor.js";
 import { METHOD_SPECS, CONSTRUCTORS } from "./api-spec.js";
 import { BUILTIN_ALIASES } from "./pamela.js";
@@ -127,7 +128,9 @@ function splitArgs(s) {
   return out.map((x) => x.trim());
 }
 
-// Removes `//` and `#` line comments, but never inside a quoted string.
+// Removes `//` line comments, but never inside a quoted string. `#` is not a
+// comment any more — a line that starts with one is a debug command, and it is
+// kept whole so the graph still shows the line the script has.
 function stripComment(line) {
   let out = "";
   let inStr = false;
@@ -145,7 +148,6 @@ function stripComment(line) {
       out += c;
       continue;
     }
-    if (c === "#") break;
     if (c === "/" && line[i + 1] === "/") break;
     out += c;
   }

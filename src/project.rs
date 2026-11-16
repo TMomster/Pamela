@@ -58,23 +58,23 @@ const DEFAULT_SCRIPT_FILE: &str = "main.pe";
 
 /// 新建项目写入的初始剧本。既可直接试跑，也把新手要找的三处入口写在注释里：
 /// 台词在这里改、样式在 `templates/` 改、完整语法在软件的「帮助」里。
-const DEFAULT_SCRIPT_SOURCE: &str = r#"# Pamela — 从这里开始写你的故事。
-# 这是项目的初始剧本 scripts/main.pe，台词就改这个文件。
-# 按 Ctrl+Enter（演出 → 运行当前脚本）试跑。
+const DEFAULT_SCRIPT_SOURCE: &str = r#"// Pamela — 从这里开始写你的故事。
+// 这是项目的初始剧本 scripts/main.pe，台词就改这个文件。
+// 按 Ctrl+Enter（演出 → 运行当前脚本）试跑。
 
-# 旁白：一行一句，不带姓名。
+// 旁白：一行一句，不带姓名。
 say("夜色落下，故事从这里开始。")
 
-# 角色台词：第二个参数写姓名，姓名框会自动出现。
+// 角色台词：第二个参数写姓名，姓名框会自动出现。
 dialog.say("你好，我是帕梅拉。", "帕梅拉")
 
-# 想改对话框的样式？在资源树里双击 templates/default.dialog.json，
-# 就能用可视化设计器调整颜色、圆角、描边、字体和姓名框。
-# 做好第二套样式后，可以用 use("templates/另一个样式.dialog.json") 切换。
+// 想改对话框的样式？在资源树里双击 templates/default.dialog.json，
+// 就能用可视化设计器调整颜色、圆角、描边、字体和姓名框。
+// 做好第二套样式后，可以用 use("templates/另一个样式.dialog.json") 切换。
 
-# 更多写法（角色、背景、音乐、选择支等）见软件内「帮助」。
-#   hero = Character("hero.png", name = "帕梅拉")
-#   hero.say("把立绘和姓名绑在一起。")
+// 更多写法（角色、背景、音乐、选择支等）见软件内「帮助」。
+//   hero = Character("hero.png", name = "帕梅拉")
+//   hero.say("把立绘和姓名绑在一起。")
 "#;
 
 /// 新建项目写入的初始对白样式模板。

@@ -413,15 +413,14 @@ t.启用（）
 ~~~
 
 ## 语句与注释
-注释是不会被视为代码的文本，Pamela 的注释有三种写法：
+注释是不会被视为代码的文本，Pamela 有两种注释写法：
 
 ~~~text
-# 单行注释
 // 单行注释
 /* 多行注释 */
 ~~~
 
-\`#\`和\`//\`表示从此开始，本行的剩余部分都被视为注释。
+\`//\` 表示从此开始，本行的剩余部分都被视为注释。
 而 \`/*\` 和 \`*/\` 的写法则表示在这两个符号之间的部分都被视为注释，所以他们可以跨行：
 
 ~~~text
@@ -432,7 +431,70 @@ t.启用（）
 */
 ~~~
 
-在编辑器里按 Ctrl+/ 可以为光标所在行或选区覆盖的每一行加上 \`//\`；整块都已注释时，再按一次取消注释，\`//\` 与 \`#\` 都会被移除。没有文字的空白行只加标记本身。
+在编辑器里按 Ctrl+/ 可以为光标所在行或选区覆盖的每一行加上 \`//\`；整块都已注释时，再按一次取消注释。没有文字的空白行只加标记本身。
+
+注意：\`#\` 不再是注释。以 \`#\` 开头的行是一条调试命令（见下一节），它写在行中间会报错——旧的 \`# 说明\` 请改成 \`// 说明\`。
+
+## 调试命令
+以 \`#\` 开头的行是写给播放器和导出器的调试命令。它不参与演出，也不改变任何值，只是标出一个位置。写法固定为三段，中间用点分开：
+
+~~~text
+# debug::com.player.skip
+~~~
+
+\`debug::\` 是固定前缀，\`com\` 是命令集（command）的意思；再往后是对象与动作：\`player\` 是播放器，\`export\` 是导出。目前可用的命令有三条：
+
+| 命令 | 作用 |
+| --- | --- |
+| \`# debug::com.player.skip\` | 播放器跑到这里才开始常速演出 |
+| \`# debug::com.export.start\` | 导出从这一句开始 |
+| \`# debug::com.export.break\` | 导出到这一句结束 |
+
+调试命令必须单独写一行（前面可以有缩进），名字写错时编辑器会直接标错并在运行时提示可用命令。
+
+**\`player.skip\`：跳过前情。**
+在播放器里从头运行时，这一行之前的语句会被快速跳过：台词不显示、不等点击、不耗时，画面直接落到这一行之前的状态，从这里开始才按正常速度播放。反复调整某一段时不必每次从头看起，把这一行挪到要调的地方，再按运行即可。
+
+它只影响播放器的运行，不影响导出。如果这一行写在本次演出走不到的分支里，运行结束会提示「没有走到调试命令」，而不是让舞台看起来像卡住了。
+
+~~~text
+// 开场是给玩家看的，调试时先跳过
+bg = Background("room.png")
+bg.enable()
+hero = Character("hero.png", name = "帕梅拉")
+hero.enable()
+
+# debug::com.player.skip
+// 下面这段才是正在调的部分
+hero.move(200, 0, 1200)
+hero.say("这一步对吗？")
+~~~
+
+**\`export.start\` / \`export.break\`：只导出一段。**
+导出 MP4 时，这两条命令给成片划一个区间：
+
+- 两条都写：只导出 \`start\` 到 \`break\` 之间这一段。
+- 只写 \`start\`：从 \`start\` 一直导到剧本结束。
+- 只写 \`break\`：从剧本开头导到 \`break\` 所在的位置。
+- 两条都不写：整段导出，与以前一样。
+
+区间之外的语句照常执行，但不进入成片：画面从 \`start\` 处开始取帧，声音按同一段时间轴裁齐，导出面板的时长估算也按这一段计算。这样改一句台词就能只导那几秒，不必等整部剧本渲完。
+
+标记要写在导出真的会走到的位置：\`start\` 没走到时导出会报错，而不是给出一个空文件。
+
+~~~text
+bg = Background("street.png")
+bg.enable()
+hero = Character("hero.png", name = "帕梅拉")
+hero.enable()
+# debug::com.export.start
+hero.say("就是这一句要改。")
+hero.move(-100, 0, 800)
+# debug::com.export.break
+hero.say("这一段不导出。")
+~~~
+
+同一条命令写了很多次时，以第一次走到的为准。
 
 ## 值与运算
 
@@ -719,19 +781,19 @@ if 好感足够(favor) {
 - \`jump("场景.pe")\` 结束当前运行，并从目标文件顶部开始一次新的运行。
 - \`cue { … }\` 让块内语句同时开始；块后的 wait 决定何时继续执行后续语句。
 - \`cue\` 只带一条语句时不必写花括号，直接接在关键字后面：\`cue(3000) ch.scale(0.5).move(0, -300)\`。时间也可以不写括号：\`cue 3000 ch.scale(0.5)\`。
-- \`wait 800\` 单独暂停 800 毫秒，也可以写 \`wait(800)\`；\`wait 0\` 不暂停。
+- \`wait 800\` 单独暂停 800 毫秒，也可以写 \`wait(800)\`；\`wait 0\` 不暂停。暂停期间按空格或点击鼠标左键（「下一步」）可以提前结束这段等待；\`stage.auto\` 的停顿不受点击影响，只有快进能缩短。
 
 cue 的时间参数只控制一项行为：块开始后经过多少毫秒，才执行块后面的语句。该时间有两种写法，含义相同：写在关键字上 \`cue(3000) { … }\`，或写在块后的 wait 上 \`{ … } wait 3000\`（写成 \`wait(3000)\` 也相同）。两者同时给出时以 wait 为准；只写一个不带毫秒数的 wait，表示等待块内动作全部结束，与 \`cue(-1)\` 相同。
 
 时间到达时，块内尚未完成的动作不会被截断，而是与后续语句同时执行。时间为 0，或时间与 wait 都不写时，块后的语句立即执行。
 
 ~~~pamela
-cue 3000 ch.scale(0.5).move(0, -300)   # 缩放与移动同时开始，3000 毫秒后继续
-cue(3000) { ch.hide(800) } wait        # 等待淡出动作全部结束
+cue 3000 ch.scale(0.5).move(0, -300)   // 缩放与移动同时开始，3000 毫秒后继续
+cue(3000) { ch.hide(800) } wait        // 等待淡出动作全部结束
 cue {
   ch.scale(2.0, 2000)
   ch.blur(20, 2000)
-} wait 5000                            # 两个动作同时执行，5000 毫秒后继续
+} wait 5000                            // 两个动作同时执行，5000 毫秒后继续
 ~~~
 
 ## 创建对象
@@ -769,27 +831,28 @@ hero.enable()
 舞台（stage）随演出自动创建，生命周期与演出相同，脚本不创建也不销毁它。它负责不属于任何对象、面向全局的调用，例如旁白：
 
 ~~~pamela
-stage.say("夜深了。")    # 规范写法
-say("夜深了。")          # 同一句调用，省略了接收者
+stage.say("夜深了。")    // 规范写法
+say("夜深了。")          // 同一句调用，省略了接收者
 ~~~
 
 - say 是 stage.say 的简写，两者完全等价，区别只在于是否写出接收者。
 - 旁白不显示姓名框；若要指定说话人，应使用角色自己的 say：\`hero.say("…")\`。
 - 与角色说话一样，旁白会等待玩家点击；第二个参数是自动播放的毫秒数，第三个参数是用作配音的音频变量。
+- 续说 \`csay("…")\` 与 \`say\` 同参，只是把台词接在对话框已有的文字后面显示，不清空上一句：角色写 \`hero.csay("…")\`，对话框写 \`dialog.csay("…", "姓名")\`。
 
 ## 点击位置与自动等待
 
 除台词外，舞台还提供两个不带文本的调用用于控制节奏，二者都只接受一个以毫秒为单位的时间参数：
 
 ~~~pamela
-stage.click()      # 创建一个点击位置：非自动模式等待手动点击，自动模式或导出时按时间参数放行
-stage.click(2000)  # 自动播放或导出时，该点击位置停留 2000 毫秒后再继续
-stage.auto(1500)   # 不创建点击位置，只暂停 1500 毫秒
+stage.click()      // 创建一个点击位置：非自动模式等待手动点击，自动模式或导出时按时间参数放行
+stage.click(2000)  // 自动播放或导出时，该点击位置停留 2000 毫秒后再继续
+stage.auto(1500)   // 不创建点击位置，只暂停 1500 毫秒
 ~~~
 
 - click 与 say 一样会阻塞脚本，但不显示台词：它只在画面右下角绘制点击标记，等待玩家点击后继续。
 - 非自动模式下 click 必须手动点击；开启自动播放或正在导出 MP4 时，click 按时间参数自动放行。
-- auto 不绘制点击标记，也不等待点击，只按时间参数计时，用于在自动播放与导出视频时安排停顿。
+- auto 不绘制点击标记，也不等待点击，只按时间参数计时，用于在自动播放与导出视频时安排停顿；与 \`wait\` 不同，空格与鼠标左键不会提前结束这段停顿。
 - 两者都可以省略接收者，写成 \`点击(2000)\`、\`自动(1500)\`，与 \`stage.click\`、\`stage.auto\` 同义。
 
 ## 舞台的批量调用
@@ -797,9 +860,9 @@ stage.auto(1500)   # 不创建点击位置，只暂停 1500 毫秒
 舞台可以对一组对象调用同一个方法，用于替代逐条书写的多个调用：
 
 ~~~pamela
-stage.enable(ch, bg, ui)        # 三个对象一起显示
-stage.hide(ch, bg)              # 两个对象一起淡出
-stage.scale(2.0, 2000, ch, bg)  # 前两个是方法自身的参数，后面是对象
+stage.enable(ch, bg, ui)        // 三个对象一起显示
+stage.hide(ch, bg)              // 两个对象一起淡出
+stage.scale(2.0, 2000, ch, bg)  // 前两个是方法自身的参数，后面是对象
 ~~~
 
 - 对象由参数末尾的一组值确定，因此 time 一类参数可以省略，不必占位；\`stage.hide(ch, bg)\` 表示两个对象立即淡出。
@@ -817,9 +880,9 @@ stage.scale(2.0, 2000, ch, bg)  # 前两个是方法自身的参数，后面是�
 ch1 = Character("ch1.png")
 ch2 = Character("ch2.png")
 bg1 = Background("bg1.png")
-ay1 = Array(ch1, ch2, bg1)   # 三个对象组成一组
-stage.blur(200 : ay1)        # 一次作用于整组
-ay1.blur(200)                # 同一调用的简写：组本身作为接收者
+ay1 = Array(ch1, ch2, bg1)   // 三个对象组成一组
+stage.blur(200 : ay1)        // 一次作用于整组
+ay1.blur(200)                // 同一调用的简写：组本身作为接收者
 ~~~
 
 - 成员为对象，数量不限；同一个对象只保留一次，重复加入不会执行两次。
@@ -836,24 +899,24 @@ ay1.blur(200)                # 同一调用的简写：组本身作为接收者
 
 ~~~pamela
 bg = Background("room.png")
-bg.enable()                 # 显示背景
-bg.crossFade("night.png", 800)  # 交叉溶解到另一张背景，仅 Background 可用
+bg.enable()                 // 显示背景
+bg.crossFade("night.png", 800)  // 交叉溶解到另一张背景，仅 Background 可用
 
 hero = Character("hero.png")
-hero.enable()               # 按已设置的位置显示角色
-hero.move(0, -100, 600)     # 相对移动，600 毫秒
-hero.moveTo(640, 200)       # 移到舞台坐标，省略时长即立即生效
-hero.rotate(15, 300)        # 相对旋转
-hero.rotateTo(0)            # 旋转到指定角度
-hero.scale(1.2, 300)        # 相对缩放
-hero.scaleTo(1)             # 缩放到指定倍率
-hero.alpha(0.5, 400)        # 透明度，范围 0–1
-hero.show(300)              # 淡入：透明度回到 1
-hero.hide(300)              # 淡出：透明度降到 0，对象仍在舞台上
-hero.front()                # 画到其他角色前面，仅 Character 可用
-hero.back()                 # 画到其他角色后面，仅 Character 可用
-hero.name("帕梅拉")          # 台词框显示的姓名，仅 Character 可用
-hero.say("你好。")           # 以角色身份说一句并等待点击，仅 Character 可用
+hero.enable()               // 按已设置的位置显示角色
+hero.move(0, -100, 600)     // 相对移动，600 毫秒
+hero.moveTo(640, 200)       // 移到舞台坐标，省略时长即立即生效
+hero.rotate(15, 300)        // 相对旋转
+hero.rotateTo(0)            // 旋转到指定角度
+hero.scale(1.2, 300)        // 相对缩放
+hero.scaleTo(1)             // 缩放到指定倍率
+hero.alpha(0.5, 400)        // 透明度，范围 0–1
+hero.show(300)              // 淡入：透明度回到 1
+hero.hide(300)              // 淡出：透明度降到 0，对象仍在舞台上
+hero.front()                // 画到其他角色前面，仅 Character 可用
+hero.back()                 // 画到其他角色后面，仅 Character 可用
+hero.name("帕梅拉")          // 台词框显示的姓名，仅 Character 可用
+hero.say("你好。")           // 以角色身份说一句并等待点击，仅 Character 可用
 ~~~
 
 - time 一律以毫秒为单位；省略即立即生效，写 0 也相同。
@@ -865,13 +928,13 @@ hero.say("你好。")           # 以角色身份说一句并等待点击，仅 
 ## 滤镜与调色
 
 ~~~pamela
-hero.blur(4, 300)          # 高斯模糊，0 为清晰
-hero.brightness(1.2)       # 亮度，1 为原样
-hero.contrast(1.2)         # 对比度，1 为原样
-hero.saturate(0.4)         # 饱和度，1 为原样
-hero.rgb(10, 0, -10)       # 颜色通道相对偏移
-hero.rgbTo(1, 1, 1)        # 颜色通道设为绝对值
-hero.hex("#ff8800", 300)   # 用十六进制颜色设置滤镜
+hero.blur(4, 300)          // 高斯模糊，0 为清晰
+hero.brightness(1.2)       // 亮度，1 为原样
+hero.contrast(1.2)         // 对比度，1 为原样
+hero.saturate(0.4)         // 饱和度，1 为原样
+hero.rgb(10, 0, -10)       // 颜色通道相对偏移
+hero.rgbTo(1, 1, 1)        // 颜色通道设为绝对值
+hero.hex("#ff8800", 300)   // 用十六进制颜色设置滤镜
 ~~~
 
 ## 自由变换
@@ -879,10 +942,10 @@ hero.hex("#ff8800", 300)   # 用十六进制颜色设置滤镜
 角色的四个角与四条边的中点可以分别移动，写法为先给出 transform，再接点的名称：
 
 ~~~pamela
-hero.transform.左上(20, -10, 300)    # 相对移动左上角
-hero.transform.左上To(0, 0)          # 把左上角放到舞台坐标
-hero.transform.上(0, -40)            # 上边中点，仅 dy 生效
-hero.transform.右(-30, 0)            # 右边中点，仅 dx 生效
+hero.transform.左上(20, -10, 300)    // 相对移动左上角
+hero.transform.左上To(0, 0)          // 把左上角放到舞台坐标
+hero.transform.上(0, -40)            // 上边中点，仅 dy 生效
+hero.transform.右(-30, 0)            // 右边中点，仅 dx 生效
 ~~~
 
 八个点为左上、上、右上、右、右下、下、左下、左，各有一个带「到」的绝对版本。
@@ -890,10 +953,10 @@ hero.transform.右(-30, 0)            # 右边中点，仅 dx 生效
 ## 关键帧动画
 
 ~~~pamela
-hero.key("hero.keyframes")   # 播放关键帧文件
-hero.key()                   # 省略文件名时按对象名取 hero.keyframes
-bg.step(3)                   # GIF 定格在第 3 帧
-bg.step(0)                   # 恢复播放
+hero.key("hero.keyframes")   // 播放关键帧文件
+hero.key()                   // 省略文件名时按对象名取 hero.keyframes
+bg.step(3)                   // GIF 定格在第 3 帧
+bg.step(0)                   // 恢复播放
 ~~~
 
 - 帧号从 1 开始；超过 GIF 总帧数时按总帧数取模：16 帧的 GIF 写 \`step(18)\` 相当于第 2 帧，与循环播放走到该帧相同。
@@ -905,23 +968,24 @@ bg.step(0)                   # 恢复播放
 对话框是全局对象，无需创建：
 
 ~~~pamela
-dialog.enable()                       # 显示对话框
-dialog.disable()                      # 隐藏，不清空台词
-dialog.say("旁白一句。")               # 不带姓名：旁白
-dialog.say("我是帕梅拉。", "帕梅拉")     # 指定姓名
+dialog.enable()                       // 显示对话框
+dialog.disable()                      // 隐藏，不清空台词
+dialog.say("旁白一句。")               // 不带姓名：旁白
+dialog.say("我是帕梅拉。", "帕梅拉")     // 指定姓名
 dialog.say(text = "我是帕梅拉。", name = "帕梅拉")
+dialog.csay("我是帕梅拉。", "帕梅拉")    // 续说：接在框里已有的文字后面，不清空对话框
 ~~~
 
 ## 声音
 
 ~~~pamela
 bgm = Audio("bgm.mp3")
-bgm.loop()          # 循环播放，用于背景音乐
-bgm.play(500)       # 从头播放，500 毫秒淡入；不阻塞脚本
-bgm.volume(0.3, 800)  # 音量渐变
-bgm.stop(1000)      # 淡出停止
+bgm.loop()          // 循环播放，用于背景音乐
+bgm.play(500)       // 从头播放，500 毫秒淡入；不阻塞脚本
+bgm.volume(0.3, 800)  // 音量渐变
+bgm.stop(1000)      // 淡出停止
 se = Audio("click.mp3")
-se.once().play()    # 只播一次，用于音效
+se.once().play()    // 只播一次，用于音效
 ~~~
 
 - play 与 stop 不阻塞：脚本不会等待音频播放结束。
@@ -932,11 +996,11 @@ se.once().play()    # 只播一次，用于音效
 \`say\` 的配音参数除了写「已建好的 \`Audio\` 变量名」，也可以直接写音频文件名（或带子目录的路径），无需先 \`Audio(...)\` 再赋值：
 
 ~~~pamela
-# 直接按文件名引用：这一句按该音频的时长切句，并随之播放。
+// 直接按文件名引用：这一句按该音频的时长切句，并随之播放。
 say("您好，这是 Pamela 的演示项目。", "Audio/intro.wav")
-# 也可以只写文件名，引擎会自动到 assets/Audio/ 下查找。
+// 也可以只写文件名，引擎会自动到 assets/Audio/ 下查找。
 say("本视频将会为您介绍 Pamela 的现状以及基本用法。", "intro2.wav")
-# 先建变量再引用的写法依旧有效，且优先级更高：
+// 先建变量再引用的写法依旧有效，且优先级更高：
 vo = Audio("intro.wav")
 say("同一段配音换种写法。", "vo")
 ~~~
@@ -962,6 +1026,22 @@ cue hero.scale(2.0, 2000).blur(20, 2000)
 
 该链总时长为 2000 毫秒：cue 使链内动作同时开始，而非依次执行。
 
+## 用 @ 指定时间：伴随参数
+
+每个方法的时间参数位置不同（\`move\` 是第 4 个，\`rotate\` 是第 2 个，\`say\` 是第 2 个）。把时长写在调用末尾、用 \`@\` 引出，这种写法称为**伴随参数**：它不占用参数位置，由引擎填到该方法的 \`time\` 上。
+
+~~~pamela
+hero.move(30, 50) @ 3000             // 等同 hero.move(30, 50, 0, 3000)
+hero.move(30, 50).rotate(45) @ 800   // 链上每个方法都拿到 800
+hero.say("我来了。") @ 600            // 台词在 600 毫秒内显示完
+hero.move(100, 0) @ 时长 * 2          // 可以是表达式，整条语句只算一次
+~~~
+
+- 伴随参数由 \`@\` 与一个毫秒数组成，取值不小于 0；写成 \`@ 0\` 是一个瞬时的变化。
+- 方法没有时间参数时，伴随参数无处可填，报错（例如 \`hero.enable() @ 1000\`），编辑器会在该行下方标记。
+- 时间已经按位置写出时不能再写伴随参数（例如 \`hero.move(1, 2, 0, 1000) @ 3000\`），报错，不会覆盖已写的值。
+- 伴随参数只能写在一条语句的末尾；链式调用时作用在整条链上。
+
 ## 错误
 
 语法错误与运行时错误均定位到行，状态栏按「第 N 行：原因」显示，编辑器在对应行下方标记。
@@ -971,13 +1051,13 @@ cue hero.scale(2.0, 2000).blur(20, 2000)
 以下脚本将前面各节的用法组合为一份可直接运行的场景，使用时将文件名替换为项目中的资源文件名即可：
 
 ~~~pamela
-# 资源准备：
-# assets/Background/room.png、night.png
-# assets/Character/hero.png、friend.png
-# assets/Audio/bgm.mp3、door.mp3
-# assets/Video/opening.mp4
+// 资源准备：
+// assets/Background/room.png、night.png
+// assets/Character/hero.png、friend.png
+// assets/Audio/bgm.mp3、door.mp3
+// assets/Video/opening.mp4
 
-# 1. 创建对象。此时画面上不显示任何对象。
+// 1. 创建对象。此时画面上不显示任何对象。
 room = Background("room.png")
 hero = Character("hero.png", x = -320, y = -500, name = "帕梅拉")
 friend = Character("friend.png", x = 320, y = -500, name = "小满")
@@ -985,17 +1065,17 @@ bgm = Audio("bgm.mp3", volume = 0.35, loop = true)
 door = Audio("door.mp3")
 clip = Video("opening.mp4")
 
-# 2. 片头视频：enable 从头重播；默认静音，需要声音须写 mute = false。
+// 2. 片头视频：enable 从头重播；默认静音，需要声音须写 mute = false。
 clip.enable()
 wait 4000
 clip.disable()
 
-# 3. 舞台布置：三张图一起显示，音乐淡入。
+// 3. 舞台布置：三张图一起显示，音乐淡入。
 stage.enable(room, hero, friend)
 bgm.play(1200)
 hero.say("晚上好，今天讲个短故事。")
 
-# 4. 并行动作：块内三句同时开始，1200 毫秒后继续。
+// 4. 并行动作：块内三句同时开始，1200 毫秒后继续。
 cue(1200) {
   hero.move(80, 0, 1200)
   friend.scale(1.1, 1200)
@@ -1003,12 +1083,12 @@ cue(1200) {
 }
 friend.say("然后呢？")
 
-# 5. 音效与换景：交叉溶解到夜景，旧图淡出后移除。
+// 5. 音效与换景：交叉溶解到夜景，旧图淡出后移除。
 door.play()
 room.crossFade("night.png", 900)
 hero.say("窗外已经全黑了。")
 
-# 6. 收尾：淡出与音乐淡出同时进行。
+// 6. 收尾：淡出与音乐淡出同时进行。
 cue {
   stage.hide(600 : hero, friend)
   bgm.stop(1000)
@@ -1960,12 +2040,12 @@ say("屋里只有一盏灯亮着。")
 - 背景支持 GIF 动图。定格到某一帧使用 \`step()\`，见后文。
 
 ~~~pamela
-# 三种写法等价
+// 三种写法等价
 bg = Background("room.png", 0, 0)
 bg = Background("room.png", x = 0, y = 0)
 bg = Background("room.png", 横 = 0, 纵 = 0)
 
-# 创建时设置夜景的初始状态：亮度降低、饱和度降低、轻微模糊
+// 创建时设置夜景的初始状态：亮度降低、饱和度降低、轻微模糊
 night = Background("room.png", brightness = 0.55, saturate = 0.7, blur = 1.5)
 night.enable()
 ~~~
@@ -2045,7 +2125,7 @@ day = Background("day.png")
 night = Background("night.png")
 day.enable()
 say("白天。")
-night.enable()          # 无过渡换景，日景立即被夜景替换
+night.enable()          // 无过渡换景，日景立即被夜景替换
 say("天黑了。")
 ~~~
 
@@ -2057,7 +2137,7 @@ say("天黑了。")
 ~~~pamela
 bg = Background("room.png", alpha = 0)
 bg.enable()
-bg.show(1200)           # 用 1200 毫秒淡入
+bg.show(1200)           // 用 1200 毫秒淡入
 ~~~
 
 ### \`hide(time?)\`（隐藏 / 渐出）
@@ -2077,7 +2157,7 @@ bg.show(600)
 - \`time\`：过渡时长（毫秒），可选。返回背景对象自身。
 
 ~~~pamela
-bg.alpha(0.6, 800)      # 半透明显示
+bg.alpha(0.6, 800)      // 半透明显示
 bg.alpha(1, 800)
 ~~~
 
@@ -2091,8 +2171,8 @@ bg.alpha(1, 800)
 - \`time\`：过渡时长（毫秒），可选，省略为 0。返回背景对象自身。
 
 ~~~pamela
-bg.move(-120, 0, 2000)     # 用 2000 毫秒把镜头向右平移（画面左移）
-bg.move(0, 60, 1500)       # 纵向位移 60，用 1500 毫秒
+bg.move(-120, 0, 2000)     // 用 2000 毫秒把镜头向右平移（画面左移）
+bg.move(0, 60, 1500)       // 纵向位移 60，用 1500 毫秒
 ~~~
 
 ### \`moveTo(x, y, z, time?)\`（移动到）
@@ -2102,8 +2182,8 @@ bg.move(0, 60, 1500)       # 纵向位移 60，用 1500 毫秒
 - \`time\`：过渡时长（毫秒），可选。返回背景对象自身。
 
 ~~~pamela
-bg.moveTo(0, 0, 800)                        # 把镜头移回正中
-bg.moveTo(y = 60, x = -120, time = 1500)    # 按参数名给出，顺序不限
+bg.moveTo(0, 0, 800)                        // 把镜头移回正中
+bg.moveTo(y = 60, x = -120, time = 1500)    // 按参数名给出，顺序不限
 ~~~
 
 - 背景移动常用于镜头平移。若图片与舞台等大，平移后边缘会露出空白，建议使用比 1920 × 1080 更宽的图，或先调用 \`scaleTo(1.2)\` 放大后再平移。
@@ -2117,8 +2197,8 @@ bg.moveTo(y = 60, x = -120, time = 1500)    # 按参数名给出，顺序不限
 - 角度不做 0–360 归一化：720 表示两整圈。\`time\` 可选，返回背景对象自身。
 
 ~~~pamela
-bg.rotate(3, 400)        # 用 400 毫秒顺时针旋转 3 度
-bg.rotate(-3, 400)       # 转回原角度
+bg.rotate(3, 400)        // 用 400 毫秒顺时针旋转 3 度
+bg.rotate(-3, 400)       // 转回原角度
 ~~~
 
 ### \`rotateTo(degrees, time?)\`（旋转到）
@@ -2137,8 +2217,8 @@ bg.rotateTo(0, 500)
 - 完整的三维说明见「Character 角色」的同一节。
 
 ~~~pamela
-bg.rotateH(20, 700)      # 用 700 毫秒沿 H 面旋转 20 度
-bg.rotateVTo(0)          # 摆回正面
+bg.rotateH(20, 700)      // 用 700 毫秒沿 H 面旋转 20 度
+bg.rotateVTo(0)          // 摆回正面
 ~~~
 
 ### \`scale(value, time?)\`（缩放）
@@ -2147,8 +2227,8 @@ bg.rotateVTo(0)          # 摆回正面
 - 倍率会复合：连续两次 \`scale(2)\` 得到四倍。\`time\` 可选，返回背景对象自身。
 
 ~~~pamela
-bg.scale(1.05, 900)      # 用 900 毫秒放大到当前的 1.05 倍
-bg.scale(0.95, 900)      # 再缩回
+bg.scale(1.05, 900)      // 用 900 毫秒放大到当前的 1.05 倍
+bg.scale(0.95, 900)      // 再缩回
 ~~~
 
 ### \`scaleTo(value, time?)\`（缩放到）
@@ -2156,8 +2236,8 @@ bg.scale(0.95, 900)      # 再缩回
 - 参数同上，但 \`value\` 是最终倍率，1.0 为原始大小。返回背景对象自身。
 
 ~~~pamela
-bg.scaleTo(1.25, 1500)   # 用 1500 毫秒放大到 1.25 倍
-bg.scaleTo(1, 1500)      # 拉回原始大小
+bg.scaleTo(1.25, 1500)   // 用 1500 毫秒放大到 1.25 倍
+bg.scaleTo(1, 1500)      // 拉回原始大小
 ~~~
 
 缩放以自己的中心为基准，不改变 \`x\` / \`y\`。将 \`scaleTo\` 与 \`moveTo\` 放入同一个 \`cue\`，可同时执行推近与平移。
@@ -2170,8 +2250,8 @@ bg.scaleTo(1, 1500)      # 拉回原始大小
 - 每个通道按 0–255 夹取，溢出部分丢弃。\`time\` 可选，返回背景对象自身。
 
 ~~~pamela
-bg.rgb(0, 0, 20, 800)      # 用 800 毫秒叠加冷蓝色
-bg.rgb(0, 0, -20, 800)     # 撤回该偏移
+bg.rgb(0, 0, 20, 800)      // 用 800 毫秒叠加冷蓝色
+bg.rgb(0, 0, -20, 800)     // 撤回该偏移
 ~~~
 
 ### \`rgbTo(r, g, b, time?)\`（调色到）
@@ -2190,8 +2270,8 @@ bg.rgbTo(0, 0, 0, 1200)
 - \`time\` 可选，返回背景对象自身。与 \`rgbTo\` 一样是绝对设置。
 
 ~~~pamela
-bg.hex("#204060", 1200)   # 染上深蓝夜色
-bg.hex("000")             # 清除染色
+bg.hex("#204060", 1200)   // 染上深蓝夜色
+bg.hex("000")             // 清除染色
 ~~~
 
 ### \`blur(value, time?)\`（模糊）
@@ -2214,7 +2294,7 @@ bg.hex("000")             # 清除染色
 四个滤镜作用于同一张图，效果叠加而不互相覆盖：先调用 \`blur(4)\` 再调用 \`saturate(0)\`，画面同时呈现模糊与去饱和。中性值分别是 \`blur = 0\`、\`brightness = 1\`、\`contrast = 1\`、\`saturate = 1\`。
 
 ~~~pamela
-# 白天转黄昏：降低亮度与饱和度、叠加暖色并轻微模糊，四个调用同时执行
+// 白天转黄昏：降低亮度与饱和度、叠加暖色并轻微模糊，四个调用同时执行
 cue(1500) {
   bg.brightness(0.65, 1500)
   bg.saturate(0.75, 1500)
@@ -2223,7 +2303,7 @@ cue(1500) {
 }
 say("太阳落下去了。")
 
-# 恢复原样
+// 恢复原样
 cue(1000) {
   bg.brightness(1, 1000)
   bg.saturate(1, 1000)
@@ -2244,8 +2324,8 @@ cue(1000) {
 - 背景的关键帧轮廓是整个取景框，因为背景铺满画面，没有自己的外接矩形。
 
 ~~~pamela
-bg.key("key-pan.keyframes")   # 播放一段镜头运动
-bg.key()                      # 按对象名查找
+bg.key("key-pan.keyframes")   // 播放一段镜头运动
+bg.key()                      // 按对象名查找
 ~~~
 
 ### \`step(frame?)\`（定格）
@@ -2256,8 +2336,8 @@ bg.key()                      # 按对象名查找
 - 定格只影响显示的帧，滤镜与调色仍作用在这张图上；写在 \`enable()\` 之后即可生效，即使 GIF 尚未解码完成。
 
 ~~~pamela
-bg.enable().step(1)     # 定格在第一帧，作为静态背景使用
-bg.step(0)              # 恢复动画
+bg.enable().step(1)     // 定格在第一帧，作为静态背景使用
+bg.step(0)              // 恢复动画
 ~~~
 
 ## 九、交叉溶解 crossFade（背景独有）
@@ -2273,9 +2353,9 @@ bg.step(0)              # 恢复动画
 bg = Background("day.png")
 bg.enable()
 say("白天。")
-bg.crossFade("dusk.png", 1500)     # 用 1500 毫秒溶解到黄昏
+bg.crossFade("dusk.png", 1500)     // 用 1500 毫秒溶解到黄昏
 say("傍晚了。")
-bg.crossFade("night.png", 0)       # 0 毫秒，等同于立即替换
+bg.crossFade("night.png", 0)       // 0 毫秒，等同于立即替换
 ~~~
 
 以下几点需要说明：
@@ -2298,18 +2378,18 @@ say("夜色一下子沉了下来。")
 ## 十、完整示例
 
 ~~~pamela
-# assets/Background/day.png、dusk.png、night.png
+// assets/Background/day.png、dusk.png、night.png
 room = Background("day.png")
 room.enable()
 say("一个很普通的下午。")
 
-# 镜头推近，同时稍微提亮
+// 镜头推近，同时稍微提亮
 cue(2000) {
   room.scaleTo(1.15, 2000)
   room.brightness(1.05, 2000)
 } wait
 
-# 溶解到黄昏，并压暗、降饱和
+// 溶解到黄昏，并压暗、降饱和
 cue(1800) {
   room.crossFade("dusk.png", 1800)
   room.brightness(0.7, 1800)
@@ -2317,7 +2397,7 @@ cue(1800) {
 }
 say("太阳快落山了。")
 
-# 溶解到夜景，镜头拉回全景
+// 溶解到夜景，镜头拉回全景
 cue(1800) {
   room.crossFade("night.png", 1800)
   room.scaleTo(1, 1800)
@@ -2326,7 +2406,7 @@ cue(1800) {
 room.hex("#182848", 1200)
 say("灯亮了起来。")
 
-# 转场：淡出到舞台底色
+// 转场：淡出到舞台底色
 room.hide(800)
 ~~~
 
@@ -2335,10 +2415,10 @@ room.hide(800)
 所有方法都返回背景对象自身，可以连写；链式调用依次执行，\`cue\` 才使动作同时开始。
 
 ~~~pamela
-# 依次执行：显示 → 用 800 毫秒变暗 → 用 800 毫秒模糊
+// 依次执行：显示 → 用 800 毫秒变暗 → 用 800 毫秒模糊
 bg.enable().brightness(0.6, 800).blur(3, 800)
 
-# 同时开始：两条过渡一起执行
+// 同时开始：两条过渡一起执行
 cue {
   bg.brightness(0.6, 800)
   bg.blur(3, 800)
@@ -2484,8 +2564,8 @@ hint.show(600)
 ~~~pamela
 caption = Text("旧书店 · 二层", 520, -300, 34, "#e8ded0")
 caption.enable()
-caption.rotateV(-18, 600)      # 向上抬起 18 度
-caption.move(-60, 20, 0, 600)  # 同时向左下方移动
+caption.rotateV(-18, 600)      // 向上抬起 18 度
+caption.move(-60, 20, 0, 600)  // 同时向左下方移动
 ~~~
 
 ## 五、颜色与字体
@@ -2497,8 +2577,8 @@ caption.move(-60, 20, 0, 600)  # 同时向左下方移动
 ~~~pamela
 title = Text("第二天 · 清晨", 0, 380, 64, "#ffd479")
 title.enable()
-title.color("#ff6b6b", 600)   # 用 600 毫秒从暖黄渐变到浅红
-title.color("tomato")        # 任何 CSS 颜色都可以，省略时长立即生效
+title.color("#ff6b6b", 600)   // 用 600 毫秒从暖黄渐变到浅红
+title.color("tomato")        // 任何 CSS 颜色都可以，省略时长立即生效
 ~~~
 
 - 色值必须是文本，写 \`color("#ffd479")\` 或 \`color(色值 = "#ffd479")\`；数字会报错。
@@ -2529,7 +2609,7 @@ title.weight(700)
 ## 六、完整示例
 
 ~~~pamela
-# 文字不需要资源文件，示例可直接运行
+// 文字不需要资源文件，示例可直接运行
 place = Text("旧书店", 0, 420, 56, "#f0e6d2", alpha = 0)
 note = Text("营业时间\\n10:00 — 20:00", 640, -360, 30, "#c8c8c8", alpha = 0)
 hint = Text("按任意键继续", 0, -470, 26, "#9a9a9a", alpha = 0)
@@ -2539,7 +2619,7 @@ place.show(500)
 note.show(500)
 auto(1200)
 
-# 两段文字一起退场，同时把提示淡入
+// 两段文字一起退场，同时把提示淡入
 cue(600) {
   place.hide(500)
   note.hide(500)
@@ -2666,10 +2746,10 @@ Audio 不提供 \`enable\` / \`disable\` / \`pause\` / \`mute\` / \`move\` 等�
 - 音频文件在首次播放时加载；资源缺失会报错，脚本继续运行。
 
 ~~~pamela
-bgm.play()        # 立即从头播放
-bgm.play(1500)    # 用 1.5 秒淡入
-se.play()         # 音效响一次
-se.play()         # 再次触发，从头重放
+bgm.play()        // 立即从头播放
+bgm.play(1500)    // 用 1.5 秒淡入
+se.play()         // 音效响一次
+se.play()         // 再次触发，从头重放
 ~~~
 
 淡入是从音量 0 增加到 \`volume\` 设定的目标值，因此 \`volume(0.4)\` 与 \`play(1000)\` 组合得到的是「淡入到 0.4」。
@@ -2681,8 +2761,8 @@ se.play()         # 再次触发，从头重放
 - 作用：停止播放，并把播放位置复位到开头，下次 \`play()\` 仍从头开始。淡出结束后音量恢复到 \`volume\` 设定的目标值，不会永久变为 0。
 
 ~~~pamela
-bgm.stop()        # 立即停止
-bgm.stop(2000)    # 用 2 秒淡出后停止，常用于场景收尾
+bgm.stop()        // 立即停止
+bgm.stop(2000)    // 用 2 秒淡出后停止，常用于场景收尾
 ~~~
 
 ### \`loop()\`（循环）
@@ -2705,7 +2785,7 @@ bgm.loop().play(1200)
 ~~~pamela
 se = Audio("click.mp3")
 se.once().play()
-bgm.once()        # 循环音乐播完这一遍即停
+bgm.once()        // 循环音乐播完这一遍即停
 ~~~
 
 ### \`volume(value, time?)\`（音量）
@@ -2715,9 +2795,9 @@ bgm.once()        # 循环音乐播完这一遍即停
 - 作用：设定音量并可选地渐变。音量记录在声音对象上，之后 \`play()\` 的淡入与 \`stop()\` 淡出后的恢复都以该值为准。
 
 ~~~pamela
-bgm.volume(0.5)          # 立即调到一半
-bgm.volume(0.15, 800)    # 用 800 毫秒压低，突出台词
-bgm.volume(0.4, 800)     # 再抬回原音量
+bgm.volume(0.5)          // 立即调到一半
+bgm.volume(0.15, 800)    // 用 800 毫秒压低，突出台词
+bgm.volume(0.4, 800)     // 再抬回原音量
 bgm.volume(0, 时长 = 1500)
 ~~~
 
@@ -2729,7 +2809,7 @@ bgm.volume(0, 时长 = 1500)
 
 ~~~pamela
 voice = Audio("line01.mp3")
-voice.duration()    # 例如 3200，表示 3.2 秒
+voice.duration()    // 例如 3200，表示 3.2 秒
 ~~~
 
 ## 五、三类典型用法
@@ -2797,6 +2877,20 @@ stage.autoVoice(false)
 - 显式写在 \`say\` 第三个参数里的配音优先，自动配音只补没有指定配音的台词。
 - 开关随一次演出存在，重开运行后回到关闭；导出成片时按同一套次数与速度混入效果音。
 
+### 自动停顿
+
+自动播放时，一句说完（文字显示完与语音播放完，取较晚的那个）默认再停 800 毫秒才切到下一句。需要连句紧接时，将该值设为 0：
+
+~~~pamela
+stage.autoPause(0)     // 说完立刻进入下一句
+stage.autoPause(300)   // 停顿改成 300 毫秒
+stage.autoPause()      // 回到默认的 800
+~~~
+
+- 中文写法 \`stage.自动停顿(…)\` 等价，也可以省略接收者写成 \`自动停顿(0)\`。
+- 它替换的是自动播放里全部四处停顿：有配音时的 800 毫秒、指定 \`time\` 后的 800 毫秒、打字机模式显示完的 500 毫秒，以及无配音时「每 3 字一组、每组 800 毫秒」的阅读时间。写 0 之后这些位置都不再停，无配音的普通台词会立刻切句。
+- 手动点击、快进（跳过）不受影响；导出成片按同一设置排定每句的停顿。
+
 ## 六、与并行和时间控制
 
 Audio 的方法都不阻塞，声音与画面因此天然同时开始：\`play()\` 的下一行立即执行。需要与画面动作同时开始时，直接相邻书写即可；需要脚本停顿时，使用 \`wait\` 或 \`cue\`。
@@ -2821,7 +2915,7 @@ cue {
 ## 七、完整示例
 
 ~~~pamela
-# assets/Audio/town.mp3、door.mp3、line01.mp3、line02.mp3
+// assets/Audio/town.mp3、door.mp3、line01.mp3、line02.mp3
 bgm = Audio("town.mp3", volume = 0.35, loop = true)
 door = Audio("door.mp3")
 line01 = Audio("line01.mp3")
@@ -3235,20 +3329,20 @@ clip.rgbTo(0, 0, 0, 800)
 ## 八、完整示例
 
 ~~~pamela
-# assets/Video/opening.mp4、rain.mp4、cut.mp4
-# assets/Background/room.png；assets/Character/hero.png
+// assets/Video/opening.mp4、rain.mp4、cut.mp4
+// assets/Background/room.png；assets/Character/hero.png
 op = Video("opening.mp4")
 rain = Video("rain.mp4", loop = true)
 cut = Video("cut.mp4", mute = false, volume = 0.5)
 
-# 1. 片头：静音播放，画面同时缓缓放大
+// 1. 片头：静音播放，画面同时缓缓放大
 op.enable()
 cue(4000) {
   op.scaleTo(1.1, 4000)
 } wait 4000
 op.disable()
 
-# 2. 动态背景：循环、静音，压暗后垫在角色后面
+// 2. 动态背景：循环、静音，压暗后垫在角色后面
 room = Background("room.png")
 hero = Character("hero.png", x = 0, y = -500, name = "帕梅拉")
 stage.enable(room, hero)
@@ -3256,7 +3350,7 @@ rain.enable()
 rain.brightness(0.6, 800).alpha(0.7, 800)
 hero.say("雨还没停。")
 
-# 3. 过场：带声音的短片，画面淡入后停留 3 秒
+// 3. 过场：带声音的短片，画面淡入后停留 3 秒
 cut.alpha(0)
 cut.enable()
 cut.show(600)
@@ -3264,7 +3358,7 @@ wait 3000
 cut.hide(600)
 cut.disable()
 
-# 4. 收尾
+// 4. 收尾
 cue {
   rain.hide(1000)
   stage.hide(1000 : room, hero)
@@ -3428,7 +3522,7 @@ snow.play()
 ## 六、常见用法
 
 ~~~pamela
-# 雨转雪：旧特效在新对象出现时自动停止
+// 雨转雪：旧特效在新对象出现时自动停止
 rain = Effect("rain", density = 1.6, speed = 1.2)
 rain.enable()
 auto(2400)
@@ -3438,13 +3532,13 @@ snow.enable()
 ~~~
 
 ~~~pamela
-# 小而密的雪，适合「窗外在下雪」的室内景
+// 小而密的雪，适合「窗外在下雪」的室内景
 snow = Effect("snow", size = 0.7, density = 2, speed = 0.8, alpha = 0.8)
 snow.enable()
 ~~~
 
 ~~~pamela
-# 渐入的细雨，适合回忆或抒情段落
+// 渐入的细雨，适合回忆或抒情段落
 drizzle = Effect("rain", size = 0.7, density = 0.6, speed = 0.8, alpha = 0.7)
 drizzle.enable()
 drizzle.alpha(0)
@@ -3612,11 +3706,11 @@ Light 不提供滤镜、调色板、关键帧与显隐以外的画面方法，�
 
 ~~~pamela
 side = Light("FFE9CC", 0.7, -600, 100)
-side.rotate(0)              # 从左边打向右
+side.rotate(0)              // 从左边打向右
 top = Light("FFE9CC", 0.7, 0, 300)
-top.rotate(90)              # 从上方打向下
+top.rotate(90)              // 从上方打向下
 corner = Light("D7E4FF", 0.6, -600, 300)
-corner.rotate(45).spread(90)  # 从左上斜着打下来
+corner.rotate(45).spread(90)  // 从左上斜着打下来
 ~~~
 
 正对镜头的全向光常用于室内照明：
@@ -3834,7 +3928,7 @@ ch.say(text = "晚上好。")
 
 ## 六、无接收者的调用
 
-第一个词是舞台回答的名字时，按无接收者调用编译。它涵盖四类：类型（背景、角色、音频、视频、特效、文本、光源、对象组）、旁白与计时（说、点击、自动、自动配音）、语言函数（转文本、跳转、长度），以及只在舞台上的动作（环境亮度、透视、参考线、开场、排除、不排除）。
+第一个词是舞台回答的名字时，按无接收者调用编译。它涵盖四类：类型（背景、角色、音频、视频、特效、文本、光源、对象组）、旁白与计时（说、续说、点击、自动、自动配音、自动停顿）、语言函数（转文本、跳转、长度），以及只在舞台上的动作（环境亮度、透视、参考线、开场、排除、不排除）。
 
 ~~~text
 背景 教室.png
@@ -4038,6 +4132,7 @@ func 淡出(角色, 时长) {
 - \`//\` 到行尾，\`/*\` 与 \`*/\` 之间跨行，均为 C 风格注释。
 - 以空格开始的 \`//\` 或 \`/*\` 视为注释，简写行编译时去掉；整行注释原样保留。
 - 台词本身需要保留 \`//\` 时，用引号把台词写成字符串。
+- \`#\` 不是注释：以它开头的行是调试命令（\`# debug::com.player.skip\` 等），简写编译不动它，原样交给 \`.pe\` 解析器。旧写法 \`# 说明\` 请改成 \`// 说明\`。
 
 ## 十三、与完整语法混用
 
@@ -4251,6 +4346,8 @@ func 增加(数量) {
 | 中文 | 英文 | 说明 |
 | --- | --- | --- |
 | 说 | say | (text, time?, audio?) 旁白，会等待点击 |
+| 续说 | csay | (text, time?, audio?) 接在对话框已有文字后面显示，不清空对话框，其余与 say 相同 |
+| 自动停顿 | autoPause | (time?) 自动播放时每句结束后的停顿，默认 800，0 为说完就切句 |
 | 点击 | click | (time?) 创建点击位置：非自动模式等待手动点击，自动播放或导出时按时间放行 |
 | 自动 | auto | (time?) 不绘制点击标记的计时等待 |
 | 环境亮度 | ambient | (0–2) 画面整体的乘算亮度，1 为原样 |
@@ -4270,7 +4367,7 @@ func 增加(数量) {
 
 ~~~pamela
 say("第一幕")
-stage.pamela()   # 也可以写成 舞台.开场() 或 开场()
+stage.pamela()   // 也可以写成 舞台.开场() 或 开场()
 say("第二幕")
 ~~~
 
@@ -4356,6 +4453,7 @@ say("第二幕")
 | 交叉溶解 | crossFade | (路径, time?) 背景交叉溶解到另一张图，仅 Background |
 | 置前 / 置后 | front / back | () 调整角色在角色层中的顺序，仅 Character |
 | 说 | say | (text, time?, audio?) 以该角色说一句并等待点击，仅 Character |
+| 续说 | csay | (text, time?, audio?) 以该角色续说，接在对话框已有文字后面，仅 Character |
 | 姓名 | name | (value) 设定台词框显示的姓名，仅 Character |
 | 变换 | transform | \`.<点>\` 八点自由变换，仅 Character |
 
@@ -4433,6 +4531,7 @@ stage.unexclude(lamp, moon : hero)
 | --- | --- | --- |
 | 启用 / 禁用 | enable / disable | () 显示或隐藏对话框，隐藏不清空台词 |
 | 说 | say | (text, name?, time?, audio?) 显示一句并等待点击，省略姓名即为旁白 |
+| 续说 | csay | (text, name?, time?, audio?) 接在框里已有文字后面显示，不清空对话框 |
 
 ## 十三、Audio 音频
 
@@ -4812,6 +4911,8 @@ use("templates/night.dialog.json")
 - 导出过程中，浮窗显示进度条、帧渲染百分比、已渲染帧数、当前视频时刻与已用时间。可以中途取消，临时文件会被删除。
 - 完成后可以「在文件夹中显示」，或选择「再导一次」返回参数页，文件名与参数保留。
 - 分辨率、帧率、码率、关键帧间隔、选择支策略与入口脚本均跨启动记忆，下次打开浮窗直接沿用。
+- 成片可以只取剧本的一段：脚本里写 \`# debug::com.export.start\` 与 \`# debug::com.export.break\` 两条调试命令划定区间（写法与含义见「代码」一章的「调试命令」）。两条都写只导中间这一段，只写 \`start\` 导到剧本结束，只写 \`break\` 从剧本开头导到这里，两条都不写仍是整段导出。
+- 区间之外的语句照常执行，但不进成片：画面从 \`start\` 处开始取帧，成片时间从 0 算起；声音按同一段时间轴平移裁齐，区间开始前已在响的音频从本该播到的位置接上；浮窗中的时长估算也按这一段计算。\`start\` 没被走到时导出报错，不写出空文件。
 
 ## 二、导出参数
 

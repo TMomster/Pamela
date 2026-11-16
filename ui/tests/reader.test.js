@@ -245,6 +245,22 @@ test("代码总文章：有语言规则、可运行示例与常见错误排查",
   }
 });
 
+test("帮助写明调试命令：跳转与导出范围，并说明 # 不再是注释", () => {
+  const article = readerArticle("help", "code");
+  for (const phrase of [
+    "## 调试命令",
+    "# debug::com.player.skip",
+    "# debug::com.export.start",
+    "# debug::com.export.break",
+    "不再是注释",
+  ]) {
+    assert.ok(article.body.includes(phrase), `代码一文缺 ${phrase}`);
+  }
+  // 导出那一章也要指向同一组命令，否则读者只在代码章里见过一次。
+  const exportArticle = readerArticle("help", "export");
+  assert.ok(exportArticle.body.includes("debug::com.export.start"));
+});
+
 test("导出 MP4 帮助写明入口、规格与限制", () => {
   const article = readerArticle("help", "export");
   assert.ok(article, "帮助里要有导出 MP4 一文");

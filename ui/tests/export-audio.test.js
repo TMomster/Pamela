@@ -262,14 +262,16 @@ class FakeSource {
     this.loop = false;
     this.started = null;
     this.stopped = null;
+    this.offset = 0;
   }
 
   connect(node) {
     return node;
   }
 
-  start(at) {
+  start(at, offset = 0) {
     this.started = at;
+    this.offset = offset;
   }
 
   stop(at) {
@@ -411,6 +413,31 @@ test("renderAudio skips a segment whose file cannot be read", async () => {
   const context = FakeContext.last;
   assert.equal(context.sources.length, 1, "坏文件只丢自己那一段");
   assert.equal(buffer.length, context.frames);
+});
+
+test("renderAudio 按调试范围平移声音，并跳过范围之前就响完的段", async () => {
+  await renderAudio({
+    voices: [
+      // 范围起点前 1 秒就开始的长音：从素材的 1 秒处接上，摆在成片第 0 秒。
+      { id: "a", path: "bgm.mp3", startMs: 0, stopMs: 5000, loop: true, gain: [{ at: 0, value: 0.5 }] },
+      // 在范围之前就响完了：与这一段无关。
+      { id: "b", path: "sfx.mp3", startMs: 200, stopMs: 400, loop: false, gain: [{ at: 200, value: 1 }] },
+      // 范围之内的：整体提前 1 秒。
+      { id: "c", path: "late.mp3", startMs: 1200, stopMs: 1600, loop: false, gain: [{ at: 1200, value: 1 }] },
+    ],
+    durationMs: 1000,
+    offsetMs: 1000,
+    loadAudio: async () => new ArrayBuffer(4),
+    AudioContextClass: FakeContext,
+  });
+
+  const context = FakeContext.last;
+  assert.equal(context.sources.length, 2, "范围之前响完的那段不排");
+  assert.equal(context.sources[0].started, 0);
+  assert.equal(context.sources[0].offset, 1, "素材从 1 秒处接着放");
+  assert.equal(context.sources[0].stopped, 1);
+  assert.equal(context.sources[1].started, 0.2, "1.2 秒的声音在成片里是 0.2 秒");
+  assert.equal(context.sources[1].stopped, 0.6);
 });
 
 test("renderAudio refuses an environment without OfflineAudioContext", async () => {

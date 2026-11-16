@@ -176,9 +176,14 @@ test("文字 is offered as a type a script builds", () => {
 
 test("a sound is offered beside the objects a script builds", () => {
   const found = suggest("Au", 2);
-  // `auto` is the stage's own timer and `autoVoice` its auto-voicing switch,
-  // both offered without their receiver.
-  assert.deepEqual(found.items.map((item) => item.label), ["Audio", "auto", "autoVoice"]);
+  // `auto` is the stage's own timer, `autoVoice` its auto-voicing switch and
+  // `autoPause` the pause after each line, all offered without their receiver.
+  assert.deepEqual(found.items.map((item) => item.label), [
+    "Audio",
+    "auto",
+    "autoPause",
+    "autoVoice",
+  ]);
   assert.equal(found.items[0].kind, "object");
 });
 
@@ -214,6 +219,7 @@ test("a dot lists the methods of the object the variable was built from", () => 
     "brightness",
     "contrast",
     "crood",
+    "csay",
     "eaa",
     "element",
     "enable",
@@ -285,6 +291,7 @@ test("a dot whose receiver cannot be worked out lists every method once", () => 
     "contrast",
     "crood",
     "crossFade",
+    "csay",
     "density",
     "densityTo",
     "direction",
@@ -384,16 +391,17 @@ test("a group is built like the other objects, and answers its membership calls"
   assert.deepEqual(labels("ay1 = Array(ch1)\nay1.ad"), ["add"]);
 });
 
-test("a character offers the two calls it speaks through", () => {
-  // `name` and `say` belong to the dialogue stage rather than the stage calls,
-  // and they are listed with everything else the object answers to.
+test("a character offers the calls it speaks through", () => {
+  // `name` / `say` / `csay` belong to the dialogue stage rather than the stage
+  // calls, and they are listed with everything else the object answers to.
   assert.deepEqual(labels('hero = Character("x")\nhero.na'), ["name"]);
   assert.deepEqual(labels('hero = Character("x")\nhero.say'), ["say"]);
+  assert.deepEqual(labels('hero = Character("x")\nhero.cs'), ["csay"]);
 });
 
 test("the dialogue global lists the calls it answers to", () => {
   // `dialog` is not a variable, so it is resolved by its own name.
-  assert.deepEqual(labels("dialog."), ["disable", "enable", "say"]);
+  assert.deepEqual(labels("dialog."), ["csay", "disable", "enable", "say"]);
 });
 
 test("the stage lists both its own calls and the ones it makes for objects", () => {
@@ -407,6 +415,7 @@ test("the stage lists both its own calls and the ones it makes for objects", () 
     "Array",
     "Audio",
     "auto",
+    "autoPause",
     "autoVoice",
     "back",
     "Background",
@@ -415,6 +424,7 @@ test("the stage lists both its own calls and the ones it makes for objects", () 
     "Character",
     "click",
     "contrast",
+    "csay",
     "density",
     "densityTo",
     "Effect",

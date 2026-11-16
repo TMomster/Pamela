@@ -554,6 +554,40 @@ test("sayLine 文本比语音长时以文本为准再加 800ms", async () => {
   assert.equal(clock.pending(), 0);
 });
 
+test("csayLine 接在上一句后面，已显示字数从上一句接着数", () => {
+  const clock = createVirtualClock();
+  const timeline = createTimeline();
+  const recording = createRecordingStage({ clock, timeline });
+
+  recording.sayLine("旁白", "你好，", { time: 300 });
+  clock.tickMs(300);
+  recording.csayLine("旁白", "我是小明", { time: 400 });
+
+  const at = stateAt(timeline, 300);
+  assert.equal(at.dialogue.text, "你好，我是小明", "整句留在画面上");
+  assert.equal(at.dialogue.revealed, 3, "前面三个字保持已显示，不被重放");
+  clock.tickMs(400);
+  assert.equal(stateAt(timeline, 700).dialogue.revealed, 7, "新增的四字写到末尾");
+});
+
+test("setAutoPause(0) 让成片里配音一结束就切句", async () => {
+  const clock = createVirtualClock();
+  const timeline = createTimeline();
+  const recording = createRecordingStage({
+    clock,
+    timeline,
+    onVoiceDuration: async () => 1000,
+  });
+  recording.setAutoPause(0);
+  const waiting = recording.sayLine("旁白", "你好世界", { time: 500, audio: "vo" });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(clock.pending(), 1);
+  clock.tickMs(1000);
+  await waiting;
+  assert.equal(clock.pending(), 0, "语音结束时就是停顿点，不再多等 800ms");
+});
+
 test("sayLine 配音读不到 / 解不出时直接抛错中止导出", async () => {
   const clock = createVirtualClock();
   const timeline = createTimeline();

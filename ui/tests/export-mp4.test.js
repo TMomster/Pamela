@@ -284,6 +284,62 @@ test("the frame loop paints until the timeline end even after the script is done
   assert.equal(calls.at(-1).command, "export_finish");
 });
 
+test("调试范围：start 之前的帧不进成片，时间戳从第一张入片的画面算起", async () => {
+  const { calls, invoke } = recorder();
+  const encoder = fakeEncoder();
+  const clock = createVirtualClock();
+  const range = { startMs: null, endMs: null, hasStart: true };
+  const exporter = createExporter({
+    invoke,
+    clock,
+    frameSource: () => ({}),
+    encoder,
+    VideoFrameClass: FakeFrame,
+    flush: flushMicrotasks,
+    range: () => range,
+    duration: () => 10_000,
+    // 演出照常从 0 开始，只是走到 2 秒时才碰到 start、走到 3 秒才碰到 break。
+    performance: async () => {
+      await clock.wait(2000);
+      range.startMs = clock.now();
+      await clock.wait(1000);
+      range.endMs = clock.now();
+    },
+  });
+
+  const result = await exporter.start();
+  // 从 2s（含）到 3s（含）逐帧：约 31 帧，而不是整段 300 帧。
+  assert.ok(result.frames >= 30 && result.frames <= 32, `帧数 ${result.frames}`);
+  // 范围之前那段不编码，所以第一帧的时间戳就是 0。
+  assert.equal(encoder.frames[0].timestamp, 0);
+  assert.equal(encoder.frames.at(-1).timestamp, Math.round((result.frames - 1) * (1_000_000 / 30)));
+  assert.equal(calls.at(-1).command, "export_finish");
+});
+
+test("调试范围：只有 start 时一路导到末尾", async () => {
+  const { invoke } = recorder();
+  const clock = createVirtualClock();
+  const range = { startMs: null, endMs: null, hasStart: true };
+  const exporter = createExporter({
+    invoke,
+    clock,
+    frameSource: () => ({}),
+    encoder: fakeEncoder(),
+    VideoFrameClass: FakeFrame,
+    flush: flushMicrotasks,
+    range: () => range,
+    duration: () => 2000,
+    performance: async () => {
+      await clock.wait(1000);
+      range.startMs = clock.now();
+    },
+  });
+
+  const result = await exporter.start();
+  // 1s 到 2s：整段 61 帧减去前面 30 帧。
+  assert.equal(result.frames, 31);
+});
+
 test("a failed performance aborts instead of silently finishing the movie", async () => {
   const { calls, invoke } = recorder();
   const exporter = createExporter({

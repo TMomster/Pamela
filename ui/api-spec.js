@@ -110,9 +110,11 @@ export const CONSTRUCTORS = Object.freeze(
 
 const GLOBAL_PARAMS = {
   say: PARAM_SPECS.say,
+  csay: PARAM_SPECS.csay,
   click: PARAM_SPECS["Stage.click"],
   auto: PARAM_SPECS["Stage.auto"],
   autoVoice: PARAM_SPECS["Stage.autoVoice"],
+  autoPause: PARAM_SPECS["Stage.autoPause"],
   str: ["value", "digits"],
   jump: ["path"],
   len: ["value"],

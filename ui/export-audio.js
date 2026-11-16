@@ -469,13 +469,17 @@ export function createVoiceDurationResolver({
  *
  * 相邻两个时间点之间是线性斜坡；同一个时间点出现两次（先 stop 再 play）时
  * 后一个覆盖前一个，避免零点重复调度。
+ *
+ * `offsetMs` 把整条折线平移到成片的时间轴上（调试范围的起点）：落在范围之前
+ * 的点夹到 0，最后一个生效的值仍然正确，因为后写覆盖前写。
  */
-export function applyGain(param, points) {
+export function applyGain(param, points, offsetMs = 0) {
+  const shift = Number(offsetMs) || 0;
   const sorted = [...points].sort((left, right) => left.at - right.at);
   let last = 0;
   let started = false;
   for (const point of sorted) {
-    const at = Math.max(0, point.at / 1000);
+    const at = Math.max(0, (point.at - shift) / 1000);
     if (!started) {
       param.setValueAtTime(point.value, at);
       started = true;
@@ -498,6 +502,9 @@ export function applyGain(param, points) {
  * @param {object} options
  * @param {Array<object>} options.voices `planAudio` 与 `createVideoRecorder` 的结果
  * @param {number} options.durationMs 影片长度
+ * @param {number} [options.offsetMs]
+ *   成片的时间原点在整条时间轴上的位置（毫秒）：调试范围从 `start` 开始导出时，
+ *   声音的事件仍记在绝对时刻上，这里把它们平移回从 0 开始的成片时间。
  * @param {(path: string) => Promise<ArrayBuffer>} options.loadAudio 读音频文件字节
  * @param {(path: string) => Promise<ArrayBuffer>} [options.loadVideo] 读视频文件字节
  * @param {() => Promise<ArrayBuffer|null>} [options.loadClip]
@@ -512,6 +519,7 @@ export function applyGain(param, points) {
 export async function renderAudio({
   voices,
   durationMs,
+  offsetMs = 0,
   loadAudio,
   loadVideo = null,
   loadClip = loadAutoVoiceClip,
@@ -520,6 +528,7 @@ export async function renderAudio({
   AudioContextClass,
   onMissing = () => {},
 }) {
+  const shift = Math.max(0, Number(offsetMs) || 0);
   const Impl = AudioContextClass ?? globalThis.OfflineAudioContext;
   if (typeof Impl !== "function") {
     throw new Error("当前环境不支持 OfflineAudioContext");
@@ -561,7 +570,18 @@ export async function renderAudio({
 
   const endSeconds = frames / sampleRate;
   for (const voice of voices) {
-    if (voice.startMs / 1000 >= endSeconds) {
+    // 相对成片的时间轴：`shift` 是成片第 0 秒在整条时间轴上的位置。
+    const startMs = Number(voice.startMs) - shift;
+    // `stopMs` 为 null 表示「一直响到影片末尾」，不能按 0 算：`Number(null)` 是 0。
+    const stopMs =
+      voice.stopMs === null || voice.stopMs === undefined
+        ? Number.POSITIVE_INFINITY
+        : Number(voice.stopMs) - shift;
+    if (startMs / 1000 >= endSeconds) {
+      continue;
+    }
+    // 在范围起点之前就已经响完的声音与这一段无关。
+    if (Number.isFinite(stopMs) && stopMs <= 0) {
       continue;
     }
     // 缺文件 / 解码失败只跳过这一段，别的声音照旧；但原因要报出去，否则
@@ -593,15 +613,18 @@ export async function renderAudio({
       onMissing(voice, new Error("解码没有返回音频数据"));
       continue;
     }
-    const startAt = Math.max(0, voice.startMs / 1000);
+    const startAt = Math.max(0, startMs / 1000);
     if (voice.kind === "Synth") {
       // 整段已由 renderVoiceBuffer 排好（含最后一个 clip），按实际时长放完，不截断。
       voice.stopMs = (startAt + (buffer.duration || 0)) * 1000;
     }
     // 视频段从素材的某个位置开始：循环时取余，不循环时夹到末尾（超出即静音）。
-    const offsetMs = Math.max(0, Number(voice.offsetMs) || 0);
+    const mediaOffsetMs = Math.max(0, Number(voice.offsetMs) || 0);
+    // 范围起点之前就已经在响的声音：素材要接着往下放，而不是从头再响一遍。
+    const skippedMs = Math.max(0, shift - Number(voice.startMs));
+    const rate = Number(voice.rate) > 0 ? Number(voice.rate) : 1;
     const mediaSeconds = buffer.duration || 0;
-    let offsetSeconds = offsetMs / 1000;
+    let offsetSeconds = (mediaOffsetMs + skippedMs * rate) / 1000;
     if (voice.kind === "Video" || voice.kind === "Audio") {
       if (voice.loop && mediaSeconds > 0) {
         offsetSeconds %= mediaSeconds;
@@ -613,19 +636,18 @@ export async function renderAudio({
     source.buffer = buffer;
     source.loop = Boolean(voice.loop);
     if (source.playbackRate) {
-      const frameRate = Number(voice.rate);
-      source.playbackRate.value = Number.isFinite(frameRate) && frameRate > 0 ? frameRate : 1;
+      source.playbackRate.value = rate;
     }
     const gain = context.createGain();
-    applyGain(gain.gain, voice.gain);
+    applyGain(gain.gain, voice.gain, shift);
     source.connect(gain);
     gain.connect(context.destination);
-    if (voice.kind === "Video" && offsetSeconds > 0) {
+    if ((voice.kind === "Video" || skippedMs > 0) && offsetSeconds > 0) {
       source.start(startAt, offsetSeconds);
     } else {
       source.start(startAt);
     }
-    const stopAt = Number.isFinite(voice.stopMs) ? voice.stopMs / 1000 : endSeconds;
+    const stopAt = Number.isFinite(stopMs) ? stopMs / 1000 : endSeconds;
     if (stopAt > startAt) {
       source.stop(Math.min(stopAt, endSeconds));
     }
@@ -744,6 +766,7 @@ export async function encodeAudio({
  * @param {object} [options.recorder] `createAudioRecorder` 的返回值
  * @param {object} [options.video] `createVideoRecorder` 的返回值：视频素材的声轨
  * @param {number} options.durationMs
+ * @param {number} [options.offsetMs] 成片时间原点在整条时间轴上的位置（调试范围起点）
  * @param {(path: string) => Promise<ArrayBuffer>} [options.loadAudio]
  * @param {(path: string) => Promise<ArrayBuffer>} [options.loadVideo]
  * @param {() => Promise<ArrayBuffer|null>} [options.loadClip] 读自动配音的单位音效
@@ -759,6 +782,7 @@ export async function buildAudioTrack({
   recorder = null,
   video = null,
   durationMs,
+  offsetMs = 0,
   loadAudio = null,
   loadVideo = null,
   // 默认取引擎自带的单位音效：自动配音不是项目资源，缺省就该能取到。写成
@@ -790,6 +814,7 @@ export async function buildAudioTrack({
     const buffer = await renderAudio({
       voices,
       durationMs,
+      offsetMs,
       loadAudio,
       loadVideo,
       loadClip,

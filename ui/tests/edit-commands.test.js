@@ -200,11 +200,14 @@ test("Ctrl+/ comments every line a selection covers and keeps the same text sele
   assert.equal(textarea.selectionEnd, 5);
 });
 
-test("Ctrl+/ takes back both // and # comments", () => {
-  const hash = new FakeTextarea("# note", 0, 0);
+test("Ctrl+/ takes back only // comments", () => {
+  // `#` 不是注释，而是一行调试命令：它在注释开关眼里就是普通文本，所以按下
+  // Ctrl+/ 是给它加 `//`，再按一次才拿掉——拿掉的是 `//`，`#` 留着。
+  const hash = new FakeTextarea("# debug::com.player.skip", 0, 0);
   assert.equal(toggleLineComment(hash), true);
-  assert.equal(hash.value, "note");
-  assert.equal(hash.selectionStart, 0);
+  assert.equal(hash.value, "// # debug::com.player.skip");
+  toggleLineComment(hash);
+  assert.equal(hash.value, "# debug::com.player.skip");
 
   const slashes = new FakeTextarea("    // note", 0, 0);
   toggleLineComment(slashes);

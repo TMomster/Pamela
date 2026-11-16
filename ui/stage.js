@@ -136,6 +136,118 @@ let replaying = false;
 let previewing = false;
 
 /**
+ * Whether the run is being fast-forwarded (the Ctrl hold, or the skip toggle).
+ *
+ * A fast-forward is still a performance — the scene plays — but it is not paced
+ * for a reader: every timed change lands at once and every pause the script
+ * asked for is cut short, so the run races to the next place it *has* to stop:
+ * a `choice`, a click the script is waiting on, or the end of the script.
+ * Nothing else is skipped: the statements still run, and the stage ends up on
+ * the same picture it would have reached by watching.
+ *
+ * It lives beside `replaying` and `previewing` because the same calls read it:
+ * `duration()` answers 0 while it is on, and `settled()` answers at once.
+ */
+let skipping = false;
+
+/**
+ * Timers waiting out an animation, a pause the script wrote (`wait`, a `cue`
+ * block's hold), and a `stage.auto`.
+ *
+ * They are kept apart because the player's three ways of going on differ.
+ * Ctrl fast-forwards everything; a click or Space — 「下一步」 — ends what is
+ * being *performed* and also ends a written `wait`, because a press during a
+ * pause is the player saying "on to the next thing"; a `stage.auto` is the one
+ * pause that keeps its length, since it asks for time rather than for a click.
+ */
+const animationWaiters = new Set();
+const pauseWaiters = new Set();
+const autoWaiters = new Set();
+
+/**
+ * Waits `time` out, recorded in `waiters` so it can be cut short.
+ *
+ * A wait is answered by hand rather than by a flag alone, because a promise
+ * already armed for three seconds would otherwise keep the script parked for
+ * the whole of it. While skip is on the answer is immediate, for the waits that
+ * have not started yet.
+ *
+ * @param {Set<() => void>} waiters The list this wait joins.
+ * @param {number} time Milliseconds to wait.
+ * @returns {Promise<void>}
+ */
+function waitFor(waiters, time) {
+  const span = Number(time);
+  if (!(span > 0) || skipping) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      waiters.delete(done);
+      resolve();
+    };
+    const timer = setTimeout(done, span);
+    waiters.add(done);
+  });
+}
+
+/**
+ * Waits `time` milliseconds for a `wait` the script wrote, or for a `cue`
+ * block's hold.
+ *
+ * A fast-forward ends it, and so does 「下一步」: a click or Space during a
+ * written pause is the player asking to go on, exactly as during a move. These
+ * are the pauses that can be cut short by hand, which is why they are not the
+ * list `stage.auto` uses.
+ *
+ * @param {number} time
+ * @returns {Promise<void>}
+ */
+function timedWait(time) {
+  return waitFor(pauseWaiters, time);
+}
+
+/**
+ * Waits `time` milliseconds for `stage.auto`.
+ *
+ * Unlike `wait`, this one asks for time rather than for a click — it is what
+ * paces auto-play and the exported video — so only a fast-forward ends it.
+ *
+ * @param {number} time
+ * @returns {Promise<void>}
+ */
+function autoTimedWait(time) {
+  return waitFor(autoWaiters, time);
+}
+
+/** Ends every wait now, for a fast-forward that has just begun. */
+function cutTimedWaits() {
+  for (const done of [...animationWaiters, ...pauseWaiters, ...autoWaiters]) {
+    done();
+  }
+  animationWaiters.clear();
+  pauseWaiters.clear();
+  autoWaiters.clear();
+}
+
+/** Ends the animation waits now, for a 「下一步」 that lands what is playing. */
+function landAnimationWaits() {
+  for (const done of [...animationWaiters]) {
+    done();
+  }
+  animationWaiters.clear();
+}
+
+/** Ends the written `wait`s now, for a 「下一步」 that skips a pause. */
+function landPauseWaits() {
+  for (const done of [...pauseWaiters]) {
+    done();
+  }
+  pauseWaiters.clear();
+}
+
+/**
  * Reads the point a `move`/`moveTo` call names.
  *
  * @param {string} kind Object name, for the message a writer sees.
@@ -163,10 +275,12 @@ function point(kind, x, y) {
  * @returns {number}
  */
 function duration(kind, time) {
-  if (replaying || previewing) {
+  if (replaying || previewing || skipping) {
     // A replay is travelling to a node, and a preview to a key: both land every
     // change at once, so the stage is on the right picture when the moment
     // arrives rather than partway through an animation no user is present.
+    // A fast-forward gets the same treatment — the player asked to go on, not
+    // to watch, so the change is already where it is going.
     return 0;
   }
   if (time === undefined || time === null) {
@@ -1885,6 +1999,17 @@ class Character {
       return this;
     };
     /**
+     * 续说：与 `say` 完全一样，只是台词接在框里已有的文字后面，不刷新对话框。
+     *
+     * 时间与配音同样按这一段的字数算（见 `createDialogue` 的 `appendLine`），
+     * 所以 `ch.say("你好，")` 之后接 `ch.csay("我是小明", 800)` 读到的是整整
+     * 一句「你好，我是小明」。
+     */
+    this.csay = (value, ...rest) => {
+      report(stage.csayLine?.(displayName, lineText(value), sayTiming(rest)));
+      return this;
+    };
+    /**
      * 逐帧图片组：一组立绘、一个速度。每换一张都走 `setCharacter`，所以这个
      * 槽位的位置、透明度、滤镜与自由变形都留在同一张图上。
      *
@@ -3298,6 +3423,19 @@ export function createStageGlobals(stage, objects = createStageObjects(stage)) {
         context.pending?.push(stage.sayLine(name ?? null, lineText(text), sayTiming(rest)));
         return dialog;
       },
+      /**
+       * 续说：与 `say` 同参，只是接在框里已有的文字后面，不刷新对话框。
+       *
+       * @param {string} text 要接上去的一段台词。
+       * @param {string} [name] 说话的人；省略是旁白。
+       */
+      csay(text, name, ...rest) {
+        if (name !== undefined && name !== null && typeof name !== "string") {
+          throw new Error("dialog.csay 的姓名需要文本");
+        }
+        context.pending?.push(stage.csayLine?.(name ?? null, lineText(text), sayTiming(rest)));
+        return dialog;
+      },
     };
     const stageApi = {
       kind: "Stage",
@@ -3385,6 +3523,16 @@ export function createStageGlobals(stage, objects = createStageObjects(stage)) {
         return stageApi;
       },
       /**
+       * 续说：把一段台词接在框里已有的文字后面，不刷新对话框。
+       *
+       * 与 `say` 同形同参（`text, time, audio`），配音与自动播放的计时也按这一
+       * 段自己的字数算；裸调用 `csay(…)` 走的就是这里。
+       */
+      csay(text, time, audio) {
+        context.pending?.push(stage.csayLine?.(null, lineText(text), sayTiming([time, audio])));
+        return stageApi;
+      },
+      /**
        * 创建一个点击位置并等待：非自动模式等玩家在该处手动点击；自动播放或
        * 导出时，`time` 是必须走完的毫秒数（未给则立即放行）。
        */
@@ -3411,10 +3559,21 @@ export function createStageGlobals(stage, objects = createStageObjects(stage)) {
         return stageApi;
       },
       /**
+       * 自动播放时每句结束后的停顿（毫秒）：默认 800。
+       *
+       * 一句说完（文字显示完与语音播放完，取较晚的那个）之后的这口气，由这个数
+       * 决定。`stage.autoPause(0)` 等于「说完就下一句」，用于连续接话的演出；
+       * 不写参数回到默认的 800。它只影响自动播放的切换时机，不改变手动点击。
+       */
+      autoPause(time) {
+        stage.setAutoPause?.(time);
+        return stageApi;
+      },
+      /**
        * 播放约 3.5 秒的 Pamela 开场动画：黑幕淡入、图标淡入并左移、右侧展开
        * 「Made with Pamela」并在其下方渐显 `github.com/tmomster/pamela`，
-       * 最后整幅淡出。写在剧本哪一行就在哪一行播放，不写就没有；回放与预览按
-       * `duration()` 的惯例立即落终态。
+       * 最后整幅淡出。写在剧本哪一行就在哪一行播放，不写就没有；回放、预览与
+       * 快进按 `duration()` 的惯例立即落终态。
        */
       pamela() {
         context.pending?.push(stage.pamelaIntro?.());
@@ -3513,14 +3672,22 @@ function frame() {
  * a position does not make the interpreter wait a turn of the event loop for
  * nothing.
  *
+ * Fast-forward follows the same rule: the change has landed already, so there
+ * is nothing to wait for and `undefined` is the honest answer — and a wait that
+ * was already armed is cut short by `cutTimedWaits`.
+ *
+ * A change in flight is also the player's to end: 「下一步」 answers its wait
+ * through `landAnimationWaits`, so a click during a long move is not swallowed
+ * by it.
+ *
  * @param {number} time
  * @returns {Promise<void> | undefined}
  */
 function settled(time) {
-  if (time <= 0) {
+  if (!(time > 0) || skipping) {
     return undefined;
   }
-  return new Promise((resolve) => setTimeout(resolve, time));
+  return waitFor(animationWaiters, time);
 }
 
 /**
@@ -4144,6 +4311,10 @@ export function createStage({
     // 自动配音开关与合成效果音：无显式 audio 的台词自动配效果音。
     getAutoVoice: () => autoVoiceOn,
     synthVoice: (chars) => voiceEffect.play(chars, autoVoiceSpeed),
+    // 鼠标左键也是「下一步」：点击先把正在播的动画与帷幕落到终态，再由对话盒
+    // 推进这一句。挂在对话盒的监听器上而不是舞台自己再挂一个，是因为点击的
+    // 第一层含义始终是「推进台词」，两者必须是同一下。
+    onAdvance: () => finishPlaying(),
   });
 
   // A question owns the choice layer the same way the box owns the dialogue
@@ -4255,6 +4426,17 @@ export function createStage({
   const runningEases = new Set();
   const cancelFrame =
     typeof cancelAnimationFrame === "function" ? cancelAnimationFrame : clearTimeout;
+
+  /**
+   * Bumped when the player's 「下一步」 lands what is being performed.
+   *
+   * An animation remembers the ticket it began under and compares it every
+   * frame: a different number means the player asked for the end, so the frame
+   * it is about to draw becomes the last one. Nothing has to be listed or
+   * cleaned up — a cut is a single increment — and an animation begun after the
+   * press simply starts under the new ticket and plays in full.
+   */
+  let cutTicket = 0;
 
   const clear = () => {
     // 开场动画属于上一场演出：清舞台时连它一起停，并解开解释器还在等的那个
@@ -4383,6 +4565,7 @@ export function createStage({
       return undefined;
     }
     const started = now();
+    const ticket = cutTicket;
     let frame = 0;
     let cancelled = false;
     const entry = {
@@ -4390,12 +4573,25 @@ export function createStage({
         cancelled = true;
         cancelFrame(frame);
       },
+      // 「下一步」 lands the interpolation on its last frame rather than leaving
+      // it to ease on after the run has already gone on.
+      finish: () => {
+        cancelled = true;
+        cancelFrame(frame);
+        runningEases.delete(entry);
+        apply(1);
+      },
     };
     const step = () => {
       if (cancelled) {
         return;
       }
-      const progress = Math.min(1, (now() - started) / time);
+      // Fast-forward — or a 「下一步」 that has just landed everything — takes
+      // the interpolation to its end instead of walking it: a mesh has no CSS
+      // transition to collapse, so the frame it is drawn on would otherwise
+      // keep easing after the run has already gone on.
+      const progress =
+        skipping || ticket !== cutTicket ? 1 : Math.min(1, (now() - started) / time);
       apply(progress);
       if (progress < 1) {
         frame = nextFrame(step);
@@ -5377,7 +5573,9 @@ export function createStage({
     entry.spinTime = 0;
     // A replay travels to a node rather than performing, so the journey is
     // skipped and the entry simply arrives — position and key frames alike.
-    if (replaying || total <= 0) {
+    // A fast-forward arrives the same way: the walk is a timed change like any
+    // other, and the player asked to be past it.
+    if (replaying || skipping || total <= 0) {
       const end = shift(pointAt(path, total));
       const movedX = end.x - entry.x;
       const movedY = end.y - entry.y;
@@ -5407,10 +5605,14 @@ export function createStage({
     cancelPath(entry);
 
     const startedAt = now();
+    const ticket = cutTicket;
     entry.moveMs = 0;
 
     const step = () => {
-      const elapsed = now() - startedAt;
+      // A walk already under way when Ctrl goes down — or when the player
+      // presses 「下一步」 — lands on its last frame rather than touring the
+      // rest of the path.
+      const elapsed = skipping || ticket !== cutTicket ? total : now() - startedAt;
       const at = shift(pointAt(path, elapsed));
       const frame = frameAt(path, elapsed);
       const movedX = at.x - entry.x;
@@ -5424,7 +5626,10 @@ export function createStage({
       // rotation keeps the angle the walk began at.
       let spin = entry.spinTo ?? 0;
       if (entry.spinTime > 0) {
-        const t = Math.min(1, (now() - entry.spinStart) / entry.spinTime);
+        const t =
+          skipping || ticket !== cutTicket
+            ? 1
+            : Math.min(1, (now() - entry.spinStart) / entry.spinTime);
         spin = entry.spinFrom + (entry.spinTo - entry.spinFrom) * t;
       }
       entry.spin = spin;
@@ -5467,7 +5672,7 @@ export function createStage({
         // A `rotate` in the same cue may still have most of its turn left. Its
         // own clock must outlive the walk, or the object is left pointing at
         // whatever fraction of the turn happened to fit inside the path.
-        finishSpin(entry);
+        finishSpin(entry, ticket);
         done?.();
         return;
       }
@@ -5492,9 +5697,11 @@ export function createStage({
    * turning until the angle the script asked for is actually reached.
    *
    * @param {object} entry The stage entry still turning.
+   * @param {number} [ticket] The 「下一步」 ticket the walk ran under, so a
+   *   turn that was landed with it is not carried on afterwards.
    * @returns {undefined}
    */
-  const finishSpin = (entry) => {
+  const finishSpin = (entry, ticket = cutTicket) => {
     if (!(entry.spinTime > 0) || entry.spinFrame != null) {
       return;
     }
@@ -5504,7 +5711,10 @@ export function createStage({
         entry.spinFrame = null;
         return;
       }
-      const t = Math.min(1, (now() - entry.spinStart) / entry.spinTime);
+      const t =
+        skipping || ticket !== cutTicket
+          ? 1
+          : Math.min(1, (now() - entry.spinStart) / entry.spinTime);
       const spin = entry.spinFrom + (entry.spinTo - entry.spinFrom) * t;
       const delta = spin - entry.spin;
       entry.spin = spin;
@@ -6116,7 +6326,9 @@ export function createStage({
    * picture is simply replaced.
    */
   const crossFadeBackground = (path, time) => {
-    if (!(time > 0)) {
+    // A dissolve is a timed change, so a fast-forward turns it into the hard
+    // cut it would be with no time given: there is nothing to watch it for.
+    if (!(time > 0) || skipping) {
       setBackground(path);
       return undefined;
     }
@@ -6916,6 +7128,10 @@ export function createStage({
     // performance and hide lines or snap objects where they should not be.
     previewing = false;
     replaying = false;
+    // Skip is the player's own switch and may well still be on, so it is not
+    // cleared here — only re-applied, which is what puts the stage's timed
+    // changes back in step with the box's advance for this run.
+    applySkip();
     clear();
   };
 
@@ -6991,7 +7207,31 @@ export function createStage({
   // the box's skip flag, combining both sources.
   let skipToggle = false;
   let skipHeld = false;
-  const applySkip = () => box.setSkip(skipToggle || skipHeld);
+  /**
+   * Applies both sources of fast-forward to the box and to the scene.
+   *
+   * Besides the box's own advance, the stage's timed changes read `skipping`.
+   * Turning it on also ends what is already running on its own clock: the
+   * opening curtain is cleared rather than played out, and every wait already
+   * armed for a move, a fade or a `wait` answers now. A fast-forward that only
+   * affected the *next* statement would leave the player watching the rest of
+   * whatever started a moment before the key went down.
+   */
+  const applySkip = () => {
+    const on = skipToggle || skipHeld;
+    const was = skipping;
+    skipping = on;
+    box.setSkip(on);
+    if (on && !was) {
+      clearIntro();
+      cutTimedWaits();
+    }
+  };
+
+  // A stage starts live, whatever the stage before it left behind: the flag is
+  // shared by every stage in the module, and a fast-forward still switched on
+  // would silently rob this performance of all its timing.
+  applySkip();
 
   /**
    * 按住 Ctrl 的快进：与开关分开记，松开只撤掉「按住」这一路。
@@ -7005,6 +7245,84 @@ export function createStage({
     }
     skipHeld = Boolean(on);
     applySkip();
+  };
+
+  /**
+   * Lands what is being performed right now, for a 「下一步」.
+   *
+   * A click or Space during the curtain, a move or a key walk used to do
+   * nothing: the press had no line to advance, and the run was waiting out an
+   * animation nobody could hurry. But 「下一步」 means "on to the next thing",
+   * so the stage brings what is playing to its end: the curtain is cleared, the
+   * waits armed for timed changes answer, a mesh or a light stops easing, the
+   * pictures jump to the values they were heading for, and a key walk arrives
+   * on its last frame.
+   *
+   * A line waiting for a click is settled beside this by the box's own
+   * listener — this ends time, not the reading. A `wait` the script wrote (or a
+   * `cue` block's hold) is skipped too: a press during a pause is the player
+   * asking for the next thing, and most visual novels answer it that way. Only
+   * `stage.auto` keeps its full length, because it asks for time rather than
+   * for a click.
+   *
+   * @returns {boolean} Whether anything was playing that could be landed.
+   */
+  const finishPlaying = () => {
+    let landed = false;
+    if (introResolve) {
+      clearIntro();
+      landed = true;
+    }
+    if (animationWaiters.size) {
+      landAnimationWaits();
+      landed = true;
+    }
+    if (pauseWaiters.size) {
+      landPauseWaits();
+      landed = true;
+    }
+    for (const ease of [...runningEases]) {
+      ease.finish();
+      landed = true;
+    }
+    const entries = [...characters.values(), background, ...texts.values()];
+    // The value a transition is heading for is already written on the element,
+    // so dropping the transition is what makes the browser show it now instead
+    // of easing towards it. A light has no element of its own; its ease was
+    // landed above.
+    const land = (node) => {
+      const transition = node?.style?.transition;
+      if (!transition || transition === "none") {
+        return;
+      }
+      node.style.transition = "none";
+      transitionTimes.delete(node);
+      landed = true;
+    };
+    for (const entry of entries) {
+      land(entry.image);
+      land(entry.mesh?.node);
+    }
+    // A walk or a turn lands on its next frame, and the ticket is what tells it
+    // the press happened. Bumping it with nothing running costs nothing.
+    if (entries.some((entry) => entry.pathFrame != null || entry.spinFrame != null)) {
+      landed = true;
+    }
+    cutTicket += 1;
+    return landed;
+  };
+
+  /**
+   * 「下一步」：先把正在播的动画、帷幕与剧本写下的 `wait` 落到终态，再结算
+   * 这一句台词。
+   *
+   * 鼠标左键走的是对话盒自己的监听器，顺序与此相同（先 `finishPlaying`，再
+   * `settle`）；宿主的快捷键与舞台自己的按键走这里，两边对「这一下做了什么」
+   * 不会有两种说法。
+   */
+  const advance = () => {
+    finishPlaying();
+    return box.settle();
   };
 
   // Space, Enter and Down advance a line, the way every visual novel accepts
@@ -7026,10 +7344,15 @@ export function createStage({
       return;
     }
     if (!box.isWaiting()) {
+      // No line to advance, but the press is still 「下一步」: it lands whatever
+      // is playing rather than being swallowed by the animation.
+      if (finishPlaying()) {
+        event.preventDefault();
+      }
       return;
     }
     event.preventDefault();
-    box.settle();
+    advance();
   });
   element.addEventListener?.("keyup", (event) => {
     if (event.key === "Control") {
@@ -7045,17 +7368,41 @@ export function createStage({
     /** Shows a line, answering the promise a click resolves. */
     sayLine: box.line,
     /**
+     * `csay` 的演出端：把这一段接在框里已有的文字后面，同样等一次点击。
+     *
+     * 与 `sayLine` 是同一段实现（`createDialogue` 的 `appendLine`），差别只有
+     * 一个：不清空上一句。
+     */
+    csayLine: (name, line, opts) => box.appendLine(name, line, opts),
+    /**
      * 玩家按下「下一步」：与鼠标左键点在画面上同义。
      *
-     * 正在逐字显示的台词先落成整句，已经显示完的台词放行；没有台词在等时什么
-     * 也不做。宿主的快捷键与舞台自己的空格走的是同一个 `settle`，两边不会对
-     * 「这一下是补完还是翻页」有不同看法。
+     * 正在播的动画、帷幕与剧本写下的 `wait` 先落终态，然后才轮到台词：逐字显示
+     * 的台词落成整句，已经显示完的放行。没有台词在等时，这一下只把动画/帷幕/停顿
+     * 走完（`stage.auto` 除外）。宿主的快捷键、舞台自己的空格与对话盒的点击监听器
+     * 走的是同一条路，两边不会对「这一下做了什么」有不同看法。
      */
-    advance: () => box.settle(),
+    advance,
     /** `stage.click(time)` 的演出端：点击位置标记 + 等待点击或自动计时。 */
     clickWait: (time) => box.clickWait(time),
-    /** `stage.auto(time)` 的演出端：无标记的纯计时等待。 */
-    autoWait: (time) => settled(time),
+    /**
+     * `stage.auto(time)` 的演出端：无标记的纯计时等待。
+     *
+     * 它要的是时间而不是点击，因此与 `wait` 分开记：Ctrl 快进会结束它，而
+     * 「下一步」不会——玩家点一下是让演出往前走，不会缩短自动播放安排好的停顿。
+     */
+    autoWait: (time) => (Number(time) > 0 ? autoTimedWait(time) : undefined),
+    /**
+     * 剧本里的一段等待，快进与「下一步」都会把它提前结束。
+     *
+     * 解释器通过 `runtime.sleep` 拿它，所以 `wait 3000` 与 `cue` 块的计时是剧本
+     * 写下的停顿：快进开着时立即返回；已经开始的，快进按下的那一刻结束。点击 /
+     * 空格同样结束它——玩家按下「下一步」就是要求往下走，不必把停顿等完。
+     *
+     * @param {number} ms 要等的毫秒数。
+     * @returns {Promise<void>}
+     */
+    sleep: (ms) => timedWait(ms),
     /** `stage.pamela()` 的演出端：约 3.5 秒的开场动画，回放与预览时立即落终态。 */
     pamelaIntro,
     /** Replaces the dialogue style; the default is used until then. */
@@ -7081,6 +7428,13 @@ export function createStage({
     getAuto: () => box.getAuto(),
     /** Sets the auto-mode delay, in ms, between a line revealing and advancing. */
     setAutoDelay: (ms) => box.setAutoDelay(ms),
+    /**
+     * `stage.autoPause(ms)`：自动播放时每句结束后的停顿，默认 800，0 关闭。
+     *
+     * 它只改自动播放切换下一句的时机（见 `dialog.js` 的 `computeDelay`），
+     * 手动点击、跳过与导出各走各的路径。
+     */
+    setAutoPause: (ms) => box.setAutoPause(ms),
     /**
      * Turns skip (fast-forward) on or off, or flips it when called with no
      * argument. A held Ctrl also drives skip (see the stage's key handlers); the

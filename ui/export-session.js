@@ -59,6 +59,16 @@ export function createExportSession({
   const timeline = createTimeline();
   const cursor = createStateCursor(timeline);
 
+  /**
+   * 调试范围：脚本里 `# debug::com.export.start` / `# debug::com.export.break`
+   * 走到的虚拟时刻，由演出侧（`export-performance.js`）在跑的时候写下。
+   *
+   * 一个对象、两处写入：画面按它在起点之前不编码、在终点收尾，音频按
+   * `startMs` 平移。`null` 表示那一条命令没走到，于是「只有 start」导到末尾、
+   * 「只有 break」从头导到那里、两条都没有就导出整段。
+   */
+  const range = { startMs: null, endMs: null };
+
   // 只有真能读文件时才录音：没有读文件的通道就没有混音，脚本里的声音被忽略。
   // 视频声轨要另读 assets/Video/，所以两种读法有一个就够建录制器。
   const wantsSound = audio && Boolean(loadAudio || loadVideo);
@@ -72,6 +82,9 @@ export function createExportSession({
           recorder: audioRecorder,
           video: videoRecorder,
           durationMs,
+          // 调试范围之后开始的那一段：声音的事件记在绝对时刻上，成片从范围
+          // 起点算起，所以混音要把整条时间轴平移回来。
+          offsetMs: range.startMs ?? 0,
           loadAudio,
           loadVideo,
           ...audioOptions,
@@ -110,6 +123,7 @@ export function createExportSession({
     videoFrames,
     voiceDuration,
     metrics,
+    range,
   };
   const exporter = createExporter({
     invoke,
@@ -124,6 +138,8 @@ export function createExportSession({
     audioTrack,
     // 裸 cue 不会等待组内动作：帧循环必须画到时间线最后一个 tween 结束。
     duration: () => timelineDuration(timeline),
+    // 调试范围由演出侧写进同一个对象，帧循环每帧读一次。
+    range: () => range,
     metrics,
     ...exporterOptions,
   });

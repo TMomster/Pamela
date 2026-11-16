@@ -7,7 +7,7 @@
 import { createRecordGlobals } from "./export-stage.js";
 import { decodeGif, gifBytesFromDataUrl, isGifPath } from "./gif.js";
 import { isMpePath, transpile } from "./mpe.js";
-import { run } from "./pamela.js";
+import { run, scanDebugCommands } from "./pamela.js";
 
 /** 与 `main.js` 的 `resolveScenePath` 同形：裸名补到 scripts/ 下。 */
 export function resolveScenePath(asked) {
@@ -177,8 +177,17 @@ export function createExportPerformance({
   };
 
   return async (session) => {
-    await preload(source);
+    // 调试范围写在会话上（`export-session.js` 建的同一个对象），帧循环与混音
+    // 都读它。范围信息由脚本自己给出：`# debug::com.export.start` 记下起点，
+    // `# debug::com.export.break` 记下终点并让这一趟就此收工。
+    //
+    // 「脚本里写没写这条命令」必须在第一个 await 之前判完：帧循环与演出并发，
+    // 起点未定的那一段要不要取帧，它第一帧就要答案。
     const program = isMpePath(path) ? transpile(source) : source;
+    const range = session.range ?? (session.range = { startMs: null, endMs: null });
+    const marks = scanDebugCommands(program).filter((command) => command.target === "export");
+    range.hasStart = marks.some((command) => command.command === "start");
+    await preload(source);
     const result = await run(program, {
       globals: createRecordGlobals(session, { config }),
       sleep: (ms) => session.clock.wait(ms),
@@ -191,10 +200,35 @@ export function createExportPerformance({
       onNode: () => {},
       onChoice: () => {},
       onLive: () => {},
+      onDebug: (statement) => {
+        if (statement.target !== "export") {
+          return null;
+        }
+        if (statement.command === "start" && range.startMs === null) {
+          range.startMs = session.clock.now();
+          return null;
+        }
+        if (statement.command === "break" && range.endMs === null) {
+          range.endMs = session.clock.now();
+          // 到 break 就收工：这一段之后的内容不进成片。
+          return { stop: true };
+        }
+        return null;
+      },
     });
     if (result?.error) {
       const where = result.error.line ? `第 ${result.error.line} 行：` : "";
       throw new Error(`脚本${where}${result.error.message}`);
+    }
+    // 起点写了却没走到（多半写在没被走到的分支里）：这一趟一张画面都没取，
+    // 与其写一个空文件，不如说清楚是哪个标记没生效。
+    if (
+      range.startMs === null &&
+      marks.some((command) => command.command === "start")
+    ) {
+      throw new Error(
+        "调试标记 # debug::com.export.start 没有在导出里走到，没有画面可以导出",
+      );
     }
     return result;
   };

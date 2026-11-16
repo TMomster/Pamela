@@ -30,8 +30,14 @@ test("numbers get the number class", () => {
 });
 
 test("line comments get the comment class", () => {
-  const html = highlightPamela("# a note\nx = 1");
-  assert.match(html, /<span class="tok-comment"># a note<\/span>/);
+  const html = highlightPamela("// a note\nx = 1");
+  assert.match(html, /<span class="tok-comment">\/\/ a note<\/span>/);
+});
+
+test("调试命令整行上色，且不再当作注释", () => {
+  const html = highlightPamela("# debug::com.player.skip\nx = 1");
+  assert.match(html, /<span class="tok-debug"># debug::com\.player\.skip<\/span>/);
+  assert.doesNotMatch(html, /tok-comment/);
 });
 
 test("block comments get the comment class", () => {
@@ -63,7 +69,7 @@ test("an unterminated string falls back to escaped plain text", () => {
 });
 
 test("the highlighted copy preserves every character of the source", () => {
-  const source = "# title\nCharacter(\"hero\", 1)\n  .move(0, 100)\n# done";
+  const source = "// title\n# debug::com.export.start\nCharacter(\"hero\", 1)\n  .move(0, 100)\n// done";
   const html = highlightPamela(source);
   // 移除高亮标记并反转义后，剩余文本必须等于源文本。
   assert.equal(unmarked(html), source);

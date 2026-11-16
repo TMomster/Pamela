@@ -217,7 +217,7 @@ export const COMMENT_MARKER = "//";
  * @param {string} value
  * @param {number} start
  * @param {number} end
- * @returns {Array<{ head: number, text: string, indent: number, blank: boolean, marker: "" | "//" | "#" }>}
+ * @returns {Array<{ head: number, text: string, indent: number, blank: boolean, marker: "" | "//" }>}
  */
 function coveredLines(value, start, end) {
   const anchor = end > start ? end - 1 : start;
@@ -228,13 +228,9 @@ function coveredLines(value, start, end) {
     const text = value.slice(head, lineEnd);
     const indent = /^[ \t]*/.exec(text)[0].length;
     const body = text.slice(indent);
-    /** @type {"" | "//" | "#"} */
-    let marker = "";
-    if (body.startsWith("//")) {
-      marker = "//";
-    } else if (body.startsWith("#")) {
-      marker = "#";
-    }
+    // `#` 不是注释：以它开头的行是调试命令，Ctrl+/ 不碰它。
+    /** @type {"" | "//"} */
+    const marker = body.startsWith("//") ? "//" : "";
     lines.push({ head, text, indent, blank: body.trim() === "", marker });
     if (newline === -1) {
       break;
@@ -276,9 +272,9 @@ function shiftPoint(point, edits, includeAt = true) {
  * `//` is written after the indentation, with a space before the text; a blank
  * line takes the bare marker. Mixed blocks — some lines commented, some not —
  * comment only the lines that are not, so one press leaves the block uniformly
- * commented and the next press removes every marker. Both `//` and `#` count as
- * a line comment when deciding, and either is removed, so a block written by
- * hand toggles the same way.
+ * commented and the next press removes every marker. `//` is the only line
+ * comment the language has: a `#` line is a debug command, so it is commented
+ * like any other line rather than having its `#` mistaken for a marker.
  *
  * The caret keeps its line and column past the marker; a selection keeps
  * covering the same text. `setRangeText` keeps the edits on the browser's undo

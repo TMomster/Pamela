@@ -42,7 +42,7 @@ import { createStageSettings } from "./stage-settings.js";
 import { createStageExitConfirm } from "./stage-exit.js";
 import { createStageKeys } from "./stage-keys.js";
 import { createStageMenu } from "./stage-menu.js";
-import { nodeKey, run, stageNameFor, tokenize } from "./pamela.js";
+import { nodeKey, run, scanDebugCommands, stageNameFor, tokenize } from "./pamela.js";
 import { createExportSession } from "./export-session.js";
 import { createExportPerformance, makePreloader, preloadPlateImages } from "./export-performance.js";
 import { estimateDuration } from "./export-estimate.js";
@@ -1545,7 +1545,10 @@ function updateHighlight({ deferErrors = false } = {}) {
   // A `.pe` script is scanned once and those tokens feed both layers; a `.mpe`
   // file is painted line by line and has to compile before it can be checked,
   // so it has no tokens to share.
-  const scanned = mpe ? null : tokenize(source);
+  // 扫描结果带上它来自哪段文本：下划线可能在 140 毫秒后才画，那时编辑器里
+  // 也许已经是另一个文档（切标签、关标签都会临时清空 textarea），拿旧 tokens
+  // 配新文本会在第 1 行画出一条根本不存在的错误。
+  const scanned = mpe ? null : { ...tokenize(source), text: source };
   host.innerHTML = mpe
     ? highlightMpe(source)
     : highlightTokens(scanned?.error ? null : scanned.tokens, source);
@@ -1639,12 +1642,12 @@ function updateErrorMarks(scanned = null) {
   // with what 运行 would report. Compiling is line-for-line, so the mark still
   // lands on the line as written; only the columns inside a line may shift.
   const text = mpe ? transpile(source) : source;
-  // A clean `.pe` scan is reused; a lexer error has no tokens to parse, and an
-  // `.mpe` file was compiled above, so both fall back to a fresh scan.
-  const error =
-    mpe || !scanned || scanned.error
-      ? syntaxErrorIn(text)
-      : syntaxErrorInTokens(scanned.tokens, text);
+  // A clean `.pe` scan is reused only while it still describes this very text:
+  // a deferred check can be flushed after the editor has moved to another
+  // document, and its tokens would then point at a line this script does not
+  // have. `scanned.text` is what `updateHighlight` scanned.
+  const fresh = !mpe && scanned && !scanned.error && scanned.text === source;
+  const error = fresh ? syntaxErrorInTokens(scanned.tokens, text) : syntaxErrorIn(text);
   inner.dataset.message = error ? `第 ${error.line} 行：${error.message}` : "";
   if (!error) {
     return;
@@ -3662,6 +3665,17 @@ async function performScriptOnStage(source, { path, name, replay = null, fromDis
   // written: what a save fingerprints is the file, not the compiled form.
   const program = isMpePath(path) ? transpile(source) : source;
 
+  // `# debug::com.player.skip` asks for a run that starts fast-forwarded: the
+  // script is performed from the top, but silently and without taking any time,
+  // until the mark is reached — from there on it plays at normal pace. Whether
+  // the mark is there has to be known before the first statement runs, so the
+  // text is scanned first; only a marked script travels.
+  const fastForward =
+    !replay &&
+    scanDebugCommands(program).some(
+      (command) => command.target === "player" && command.command === "skip",
+    );
+
   // The manifest's typewriter mode is the run's fallback, not just what the
   // settings panel last picked: a project opened with 慢速 must play slowly
   // without anyone opening 设置 first. A style file naming its own
@@ -3721,8 +3735,10 @@ async function performScriptOnStage(source, { path, name, replay = null, fromDis
   // reads them, so a save knows every script the run walked through.
   session.texts = new Map([[path, source]]);
   // A replay travels silently and instantly; the interpreter turns the flag
-  // off at the node it reaches, through `onLive`.
-  stage.setReplay(Boolean(replay));
+  // off at the node it reaches, through `onLive`. A debug fast-forward travels
+  // the same way — silent, nothing waited for — and turns the flag off at its
+  // mark, so what follows is performed and heard like any other run.
+  stage.setReplay(Boolean(replay) || fastForward);
   refreshEditor();
 
   // One cache per run: a scene included twice plays twice, but its text is read
@@ -3754,6 +3770,10 @@ async function performScriptOnStage(source, { path, name, replay = null, fromDis
     return scenes.get(resolved);
   };
 
+  // 快进阶段的等待一律立即兑现：`wait 3000` 是给观众看的停顿，作者在标记
+  // 之前那一段不需要它。转成常速后这一位跟着关掉，后面的 `wait` 照常计时。
+  let travelling = fastForward;
+
   let result;
   try {
     result = await run(program, {
@@ -3783,6 +3803,14 @@ async function performScriptOnStage(source, { path, name, replay = null, fromDis
         stage?.setDialogueStyle(config);
       },
       source: path,
+      // A pause the script writes — `wait 500`, a `cue` block's hold — is the
+      // same kind of time as an animation is, so a fast-forward cuts it short
+      // too. The stage answers at once while skip is on, and a pause already
+      // under way ends when Ctrl goes down. A debug fast-forward is not the
+      // reader's skip, so its pauses are answered here and nowhere else.
+      sleep: (ms) => (travelling ? undefined : stage.sleep(ms)),
+      // 起点就快进的那一趟：解释器在标记处转成常速，并在这里通知舞台。
+      fastForward,
       stopped: () => token !== runCount,
       // What a save is made of: the node the run stands on and the answers it
       // has taken. Both reach the editor from here; the stage never reads a
@@ -3797,7 +3825,10 @@ async function performScriptOnStage(source, { path, name, replay = null, fromDis
         session.choices.push({ key: nodeKey(answer.file, answer.path), picked: answer.picked });
       },
       replay,
-      onLive: () => stage.setReplay(false),
+      onLive: () => {
+        travelling = false;
+        stage.setReplay(false);
+      },
     });
   } finally {
     // However the run ends, the stage stops replaying: a save that matched no
@@ -3831,6 +3862,15 @@ async function performScriptOnStage(source, { path, name, replay = null, fromDis
     setMessage("存档与当前剧本对不上：没有走到存档记录的位置", { error: true });
     return;
   }
+  if (result.skipMissed) {
+    // The fast-forward never met its mark, so the whole run went by silently:
+    // the mark sits in a branch this play-through does not take. Saying so is
+    // the only thing that distinguishes it from a stage that refused to play.
+    setMessage("没有走到调试命令 # debug::com.player.skip 的位置，整段都没有显示", {
+      error: true,
+    });
+    return;
+  }
   // A message the run itself raised — a `key()` whose file cannot be read, an
   // image that would not load — is the reason the scene looked wrong, and
   // saying "已运行" over the top of it hides exactly what the author needs to
@@ -3838,7 +3878,13 @@ async function performScriptOnStage(source, { path, name, replay = null, fromDis
   if (runTrouble) {
     return;
   }
-  setMessage(replay ? "已从存档继续" : `已运行 ${path ?? "脚本"}`);
+  setMessage(
+    replay
+      ? "已从存档继续"
+      : fastForward
+        ? "已从调试命令 # debug::com.player.skip 处开始播放"
+        : `已运行 ${path ?? "脚本"}`,
+  );
 }
 
 /**
@@ -4024,14 +4070,37 @@ async function runPlay() {
     );
     return;
   }
-  if (session.view === "code" && dom.editorText && !dom.editorText.hidden) {
-    await performScript(dom.editorText.value, {
+  const typed = editorScriptText();
+  if (typed !== null && typed.trim() !== "") {
+    await performScript(typed, {
       path: session.openPath,
       name: stageNameFor(session.openPath),
     });
   } else {
     await runFileOnDisk(session.openPath);
   }
+}
+
+/**
+ * 编辑器里当前脚本的文本，当前标签不是脚本时为 `null`。
+ *
+ * 运行取的是这份文本，而不是「编辑器区此刻显示的是哪块面板」：`session.view`
+ * 只说明面板，一次演出留下的过时 `view`（演出中切过标签，`doc.view` 记成
+ * `stage`，切回来后又把它恢复出来）会让运行悄悄改读磁盘上的副本 —— 屏幕上
+ * 没有问题的脚本，却报出另一份文本的错，只有重启才会清掉。文本为空时也返回
+ * `null`，让调用方退回磁盘副本，而不是拿空文本去解析。
+ *
+ * @returns {string | null}
+ */
+function editorScriptText() {
+  if (!dom.editorText) {
+    return null;
+  }
+  const doc = activeDoc();
+  if (!doc || doc.kind !== "script") {
+    return null;
+  }
+  return dom.editorText.value;
 }
 
 /**

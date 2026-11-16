@@ -272,3 +272,147 @@ test("舞台转发：getHistory 透传对话盒历史", () => {
     assert.equal(stage.getHistory()[0].text, "舞台台词");
   });
 });
+
+test("快进：帷幕与计时等待都不再占时间", async () => {
+  await inFakeDom(async () => {
+    const stage = createStage({
+      element: fakeElement(),
+      surface: fakeElement(),
+      resolveAsset: () => Promise.resolve("data:image/png;base64,"),
+    });
+
+    try {
+      stage.toggleSkip(true);
+      // 开场帷幕（`stage.pamela()` 的黑幕）直接落终态，不等它演完。
+      assert.equal(stage.pamelaIntro(), undefined);
+      // 剧本里的计时等待也一样：`stage.auto` 与 `wait` 都是按时间等的停顿。
+      const started = Date.now();
+      await stage.autoWait(5000);
+      assert.ok(Date.now() - started < 1000, "五秒的等待不该真等五秒");
+      await stage.sleep(5000);
+    } finally {
+      stage.toggleSkip(false);
+    }
+  });
+});
+
+test("快进：按下 Ctrl 会结束已经开始的那段等待", async () => {
+  await inFakeDom(async () => {
+    const element = fakeElement();
+    const stage = createStage({
+      element,
+      surface: fakeElement(),
+      resolveAsset: () => Promise.resolve("data:image/png;base64,"),
+    });
+
+    let waited = false;
+    const waiting = stage.sleep(5000).then(() => {
+      waited = true;
+    });
+    // The stage hears the key itself, the way the live performance does.
+    element.dispatch("keydown", { key: "Control" });
+    await waiting;
+    assert.equal(waited, true, "已经开始的等待被快进提前结束");
+    element.dispatch("keyup", { key: "Control" });
+  });
+});
+
+test("下一步：点击让帷幕立即落终态", async () => {
+  await inFakeDom(async () => {
+    const element = fakeElement();
+    const stage = createStage({
+      element,
+      surface: fakeElement(),
+      resolveAsset: () => Promise.resolve("data:image/png;base64,"),
+    });
+
+    // 帷幕正演着：没有台词在等，点击仍然是「下一步」。
+    const intro = stage.pamelaIntro();
+    assert.equal(typeof intro?.then, "function");
+    element.dispatch("click");
+    await intro;
+  });
+});
+
+test("下一步：空格与点击一样结束帷幕", async () => {
+  await inFakeDom(async () => {
+    const element = fakeElement();
+    const stage = createStage({
+      element,
+      surface: fakeElement(),
+      resolveAsset: () => Promise.resolve("data:image/png;base64,"),
+    });
+
+    const intro = stage.pamelaIntro();
+    element.dispatch("keydown", { key: " ", preventDefault() {} });
+    await intro;
+  });
+});
+
+test("下一步：点击跳过剧本写下的 wait", async () => {
+  await inFakeDom(async () => {
+    const element = fakeElement();
+    const stage = createStage({
+      element,
+      surface: fakeElement(),
+      resolveAsset: () => Promise.resolve("data:image/png;base64,"),
+    });
+
+    let waited = false;
+    const pause = stage.sleep(5000).then(() => {
+      waited = true;
+    });
+    element.dispatch("click");
+    await wait(20);
+    assert.equal(waited, true, "点击把写下的停顿直接跳过");
+    await pause;
+  });
+});
+
+test("下一步：空格跳过剧本写下的 wait", async () => {
+  await inFakeDom(async () => {
+    const element = fakeElement();
+    const stage = createStage({
+      element,
+      surface: fakeElement(),
+      resolveAsset: () => Promise.resolve("data:image/png;base64,"),
+    });
+
+    let waited = false;
+    const pause = stage.sleep(5000).then(() => {
+      waited = true;
+    });
+    let prevented = false;
+    element.dispatch("keydown", {
+      key: " ",
+      preventDefault() {
+        prevented = true;
+      },
+    });
+    await wait(20);
+    assert.equal(waited, true, "空格同样跳过写下的停顿");
+    assert.equal(prevented, true, "这一下由舞台接手，不留给页面滚动");
+    await pause;
+  });
+});
+
+test("下一步：stage.auto 的停顿照旧等完", async () => {
+  await inFakeDom(async () => {
+    const element = fakeElement();
+    const stage = createStage({
+      element,
+      surface: fakeElement(),
+      resolveAsset: () => Promise.resolve("data:image/png;base64,"),
+    });
+
+    let waited = false;
+    const pause = stage.autoWait(120).then(() => {
+      waited = true;
+    });
+    element.dispatch("click");
+    await wait(40);
+    assert.equal(waited, false, "auto 要的是时间，不是一次点击");
+    await pause;
+    assert.equal(waited, true);
+  });
+});

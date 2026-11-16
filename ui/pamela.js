@@ -10,11 +10,15 @@ import { isColorMark } from "./rich-text.js";
  * The first subset needed only `= ( ) . , ; { }`. Operators added the rest,
  * and `-` is one of them now: a leading minus is a unary operator applied to
  * the number beside it, never part of the number.
+ *
+ * `@` is the time suffix of a statement: `ch.move(30, 50) @ 3000`. It stands
+ * for the call's `time` argument whatever position that argument has (see
+ * `parseStatement`), so it is punctuation rather than an operator.
  */
 
 const PUNCTUATION = new Set([
   "=", "(", ")", ".", ",", ";", "[", "]", "{", "}",
-  "+", "-", "*", "/", "%", "<", ">", "!", ":",
+  "+", "-", "*", "/", "%", "<", ">", "!", ":", "@",
 ]);
 
 /**
@@ -159,6 +163,55 @@ const FALSE = "false";
 
 /** The one empty value. */
 const NULL = "null";
+
+/**
+ * 调试命令的名字与含义。
+ *
+ * 一行以 `#` 开头的文字是一条调试命令，而不是注释：`#` 后面跟固定的 `debug::`
+ * 前缀，然后是命令集、对象与动作，写成三段点分的名字。`com` 是命令集（command）
+ * 的意思，所以 `debug::com.player.skip` 读作「调试 → com 命令集 → 播放器 →
+ * 跳到此处」。
+ *
+ * 命令只对宿主有用：解释器不改变画面，只把「走到这里了」报给宿主。播放器据此
+ * 决定从哪里开始常速演出，导出据此决定导哪一段。认不出来的名字在解析期就报错，
+ * 因为写错的调试命令静默通过时，作者会以为标记生效了。
+ */
+export const DEBUG_COMMANDS = new Map([
+  ["debug::com.player.skip", { target: "player", command: "skip" }],
+  ["debug::com.export.start", { target: "export", command: "start" }],
+  ["debug::com.export.break", { target: "export", command: "break" }],
+]);
+
+/** 所有调试命令的写法，用于报错时列出可用的名字。 */
+const DEBUG_NAMES = [...DEBUG_COMMANDS.keys()].map((name) => `# ${name}`).join("、");
+
+/**
+ * 扫出脚本文本里的调试命令，按行号报告。
+ *
+ * 宿主在开演之前就要知道答案：播放器必须在第一条语句之前决定这一趟是常速还是
+ * 一路快进，而那时程序还没解析完。规则与词法器一致——只有整行以 `#` 开头的
+ * 文字才算，`line` 是 1 起的行号；认不出的名字照样报出来，`known` 标出它是否
+ * 是已知命令（报错交给解析器，这里只回答「有没有」）。
+ *
+ * @param {string} source
+ * @returns {Array<{ text: string, line: number, target?: string, command?: string,
+ *   known: boolean }>}
+ */
+export function scanDebugCommands(source) {
+  const found = [];
+  String(source ?? "")
+    .split("\n")
+    .forEach((line, index) => {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("#")) {
+        return;
+      }
+      const text = trimmed.slice(1).trim();
+      const known = DEBUG_COMMANDS.get(text);
+      found.push({ text, line: index + 1, ...(known ?? {}), known: Boolean(known) });
+    });
+  return found;
+}
 
 /**
  * Every word the language reserves.
@@ -425,9 +478,13 @@ const MAX_STATEMENTS = 100_000;
  * way Python allows. Braces are not on that list — a `{` opens a block, and the
  * newlines inside it still divide statements.
  *
- * Comments are dropped rather than turned into tokens: `#` and `//` run to the
- * end of the line — the newline after them is still a separator — and `/*`
- * opens a block comment that covers whatever it spans, newlines included.
+ * Comments are dropped rather than turned into tokens: `//` runs to the end of
+ * the line — the newline after them is still a separator — and `/*` opens a
+ * block comment that covers whatever it spans, newlines included.
+ *
+ * `#` is no longer a comment: a line that starts with one is a debug command
+ * (`# debug::com.player.skip`), carried as a single token so the parser can
+ * check the name and the interpreter can report it to the host.
  *
  * @param {string} source
  * @returns {{ tokens: Array<object> } | { error: { message: string, line: number, column: number } }}
@@ -474,12 +531,35 @@ export function tokenize(source) {
       continue;
     }
 
-    // `#` and `//` run to the end of the line, so a script can document
-    // itself. The newline is left where it is: it still separates statements.
-    if (char === "#" || (char === "/" && text[index + 1] === "/")) {
+    // `//` runs to the end of the line, so a script can document itself. The
+    // newline is left where it is: it still separates statements.
+    if (char === "/" && text[index + 1] === "/") {
       while (index < text.length && text[index] !== "\n") {
         index += 1;
       }
+      continue;
+    }
+
+    // `#` opens a debug command, and only at the head of a line: the rest of the
+    // line is the command's name, carried as one token. Anywhere else it is a
+    // mistake worth reporting rather than a comment — a note typed after a call
+    // with `#` used to hide itself, and now would silently mean nothing.
+    if (char === "#") {
+      if (text.slice(lineStart, index).trim() !== "") {
+        return fail(
+          "“#”只能写在行首：以它开头的行是调试命令，不再是注释（注释请用 //）",
+          index,
+        );
+      }
+      const start = index;
+      while (index < text.length && text[index] !== "\n") {
+        index += 1;
+      }
+      tokens.push({
+        type: "debug",
+        value: text.slice(start + 1, index).trim(),
+        ...position(start),
+      });
       continue;
     }
 
@@ -745,6 +825,11 @@ export function parse(tokens) {
 
   function parseStatement() {
     const token = peek();
+    // 一行调试命令自成一类语句：它不读写任何值，只标出一个位置。整行已经收成
+    // 一个记号，所以这里就把它吃掉，后面的换行才是语句的结束。
+    if (token.type === "debug") {
+      return parseDebug(advance());
+    }
     // 关键字不可作为赋值目标，因此在词法阶段报错。
     // 关键字不可作为赋值目标，因此在词法阶段报错。
     // letting `if = 1` fail somewhere inside the condition it looks like it
@@ -810,7 +895,12 @@ export function parse(tokens) {
       if (value.error) {
         return value;
       }
-      return { node: { type: "assign", name, value: value.node, line: token.line } };
+      // 赋值的右边同样可以带 `@`：`x = hold("hi") @ 250` 把时长交给右边那次调用。
+      const timed = parseChainTime(value.node);
+      if (timed.error) {
+        return timed;
+      }
+      return { node: { type: "assign", name, value: timed.node, line: token.line } };
     }
 
     // A compound assignment is read as one token, so `x += 1` never looks like
@@ -843,7 +933,111 @@ export function parse(tokens) {
     if (value.error) {
       return value;
     }
-    return { node: { type: "expression", value: value.node, line: token.line } };
+    const timed = parseChainTime(value.node);
+    if (timed.error) {
+      return timed;
+    }
+    return { node: { type: "expression", value: timed.node, line: token.line } };
+  }
+
+  /**
+   * 一条调试命令：`# debug::com.player.skip`。
+   *
+   * 词法器已经把整行收成一个记号，这里只认名字：名字不在表里就报错，并列出
+   * 可用的几个。写错的调试命令若静默通过，作者会以为自己标好了位置，实际
+   * 什么也没发生——那是最难查的一类问题。
+   *
+   * @param {object} token 词法器产出的 `debug` 记号
+   * @returns {{ node: object } | { error: object }}
+   */
+  function parseDebug(token) {
+    const text = String(token.value ?? "").trim();
+    const known = DEBUG_COMMANDS.get(text);
+    if (!known) {
+      return fail(`未知的调试命令：# ${text || "（空）"}。可用的是 ${DEBUG_NAMES}`, token);
+    }
+    return {
+      node: {
+        type: "debug",
+        target: known.target,
+        command: known.command,
+        text,
+        line: token.line,
+      },
+    };
+  }
+
+  /**
+   * 解析语句末尾的 `@ 时长`：`ch.move(30, 50) @ 3000`。
+   *
+   * 时长只写一次，却要填进链上每一个方法的 `time` 参数——每个方法的时间参数
+   * 位置都不同（`move` 是第 4 个，`say` 是第 2 个），所以由解释器按各自的参数表
+   * 写入，这里只把时长与链一起装进一个节点（`chainTime`）。
+   *
+   * `@` 只能接在调用后面：别处出现是写错了行，报错比忽略有用得多。静态就能
+   * 认出「这个方法没有时间参数」的情况（`enable`、`pause`……）也在解析期报出，
+   * 这样编辑器能在打字时直接画出错号，而不用先跑一遍剧本。
+   *
+   * @param {object} value 已解析好的表达式
+   * @returns {{ node: object } | { error: object }}
+   */
+  function parseChainTime(value) {
+    if (!at("punct", "@")) {
+      return { node: value };
+    }
+    const mark = advance();
+    if (value.type !== "call") {
+      return fail("只有方法调用才能用 @ 指定时长", mark);
+    }
+    const time = parseExpression();
+    if (time.error) {
+      return time;
+    }
+    for (const call of chainCalls(value)) {
+      const name = nameOfCallee(call.callee);
+      const spec = name === null ? null : PARAM_SPECS[name];
+      if (spec && !spec.includes("time")) {
+        return fail(`${name} 没有时间参数，不能用 @ 指定时长`, mark);
+      }
+      call.timed = true;
+    }
+    return {
+      node: { type: "chainTime", body: value, ms: time.node, line: value.line },
+    };
+  }
+
+  /**
+   * 一条调用链上的每个调用，由外到内：`ch.a(1).b(2)` 答 `[b 的调用, a 的调用]`。
+   *
+   * 链的写法是一层层套起来的：外层调用的被调者是一个成员，成员的对象又是里层
+   * 调用。因此从最外层顺着 `callee.object` 走到底，走到的就是整条链——`@` 要
+   * 作用的是这些调用，而不是被传进参数里的别的调用。
+   */
+  function chainCalls(node) {
+    const calls = [];
+    let cursor = node;
+    while (cursor && cursor.type === "call") {
+      calls.push(cursor);
+      cursor = cursor.callee.type === "member" ? cursor.callee.object : null;
+    }
+    return calls;
+  }
+
+  /**
+   * 一个被调者静态可知的名字，或 `null`。
+   *
+   * `ch.move(…)` 的接收者要等到运行时才知道种类，但方法名在这里就有；裸调用
+   * （`say(…)`）同理。名字换成英文后去查 `PARAM_SPECS` 的裸键——查不到说明
+   * 这个名字不是语言自己的方法，`@` 是否成立留给运行时判断。
+   */
+  function nameOfCallee(callee) {
+    if (callee.type === "member") {
+      return englishNameFor(callee.name);
+    }
+    if (callee.type === "identifier") {
+      return englishNameFor(callee.name);
+    }
+    return null;
   }
 
   /**
@@ -2034,10 +2228,15 @@ const GLOBAL_ALIASES = [
   // A bare `say` is the narrator's line; a character's own `say` is a method, so
   // the same word is listed below as well. Both spellings answer `say`.
   ["说", "say"],
+  // 续说：同样是把台词交给对话框，只是接在上一条后面。裸调用只有旁白的写法，
+  // 角色与对话框各自的 `csay` 列在方法表里。
+  ["续说", "csay"],
   // 点击位置（等待手动点击或自动计时）与无标记的自动计时等待，均属于舞台。
   ["点击", "click"],
   ["自动", "auto"],
   ["自动配音", "autoVoice"],
+  // 自动播放时每句结束后的停顿（毫秒），默认 800，0 关闭。
+  ["自动停顿", "autoPause"],
   ["转文本", "str"],
   ["跳转", "jump"],
   ["长度", "len"],
@@ -2132,6 +2331,9 @@ const METHOD_ALIASES = [
   ["不排除", "unexclude"],
   // Speaking.
   ["说", "say"],
+  // 续说：`ch.续说(...)` / `对话框.续说(...)` 与各自的 `say` 同参，只是接在
+  // 上一句后面显示。
+  ["续说", "csay"],
   ["姓名", "name"],
   // 文字：一次设置同时作用于中文与西文。
   ["字体", "font"],
@@ -2410,9 +2612,17 @@ export const PARAM_SPECS = {
   say: ["text", "time", "audio"],
   "Stage.say": ["text", "time", "audio"],
   "Dialog.say": ["text", "name", "time", "audio"],
+  // 续说：台词接在上一个对话框内容后面，不刷新对话框。参数与 `say` 一一对应，
+  // 所以 `time` / `audio` 的写法与位置完全相同。
+  csay: ["text", "time", "audio"],
+  "Stage.csay": ["text", "time", "audio"],
+  "Dialog.csay": ["text", "name", "time", "audio"],
   // 舞台的点击位置与自动计时等待：都只有一个时间参数。
   "Stage.click": ["time"],
   "Stage.auto": ["time"],
+  // 自动播放时每句结束后的停顿：默认 800，0 关闭。参数名用 `time`，与上面两个
+  // 同类调用一致（`@` 因此也能给它一个时长）。
+  "Stage.autoPause": ["time"],
   // 自动配音开关与播放速度：true 时为没有显式配音的 say 自动配一段合成效果音；
   // 整数参数表示播放速度（次/秒，1–10，默认 10），0 表示关闭。
   autoVoice: ["on"],
@@ -2719,6 +2929,36 @@ export function applyNamedArgs(spec, args, named, callable, node) {
 }
 
 /**
+ * 把 `@` 给出的时长填进一次调用的参数表。
+ *
+ * `time` 在每个方法里的位置都不同，这正是 `@` 存在的理由：写在调用后面一次，
+ * 由这张表把它落到该落的那一格。已经按位置写了时间参数的调用报错而不是覆盖——
+ * 同一格写两遍是笔误，两行都留着才看得出作者想要哪一个。
+ *
+ * 跳过的格子留空（`undefined`），与具名参数的填法一致：宿主把「没给」读成一个
+ * 空缺，而不是 0。
+ *
+ * @param {string[] | null} spec 该调用的参数名（构造器、舞台方法、脚本函数的形参）
+ * @param {unknown[]} args 已经按位置给好的参数
+ * @param {number} ms `@` 给出的毫秒数
+ * @param {string} callable 出错时报的名字
+ * @returns {{ args: unknown[] } | { error: object }}
+ */
+export function applyTimeArg(spec, args, ms, callable) {
+  if (!spec || !spec.includes("time")) {
+    return { error: { message: `${callable} 没有时间参数，不能用 @ 指定时长` } };
+  }
+  const at = spec.indexOf("time");
+  if (at < args.length) {
+    return { error: { message: `${callable} 使用了重复的时间参数` } };
+  }
+  const out = args.slice();
+  while (out.length < at) out.push(undefined);
+  out[at] = ms;
+  return { args: out };
+}
+
+/**
  * Runs a parsed program.
  *
  * @param {{ statements: Array<object> }} program
@@ -2754,7 +2994,17 @@ export function applyNamedArgs(spec, args, named, callable, node) {
  *   until `target` is reached, following the recorded answers, and this run
  *   becomes live there. See `setReplay` on the stage.
  * @param {(node: object) => void} [runtime.onLive]
- *   Called at the moment a replay reaches its node and turns live.
+ *   Called at the moment a replay reaches its node and turns live, and at the
+ *   moment a `fastForward` run reaches its `# debug::com.player.skip` mark.
+ * @param {boolean} [runtime.fastForward]
+ *   Starts the run travelling rather than performing: the statements before the
+ *   `# debug::com.player.skip` mark are performed silently and instantly, and
+ *   the run turns live there (through `onLive`). A run that never reaches the
+ *   mark answers `skipMissed`, because nothing was ever shown.
+ * @param {(statement: { target: string, command: string, line: number },
+ *   node: object) => ({ stop?: boolean } | void)} [runtime.onDebug]
+ *   Reports each `# debug::comm…` command the run walks over. Answering
+ *   `{ stop: true }` ends the run at the mark.
  * @param {object} [runtime.context] The context the stage's globals are built
  *   with, and the one passed to every constructor. `assignee` is set to the
  *   variable being assigned before each statement runs, so a constructor can
@@ -2837,6 +3087,35 @@ export async function interpret(program, runtime = {}) {
    */
   let simultaneous = false;
 
+  /**
+   * `@` 给这一条语句的调用链定的时长，没有 `@` 时是 `null`。
+   *
+   * 链上每个调用都带着 `timed` 标记（解析器打的），它们共用这一个数：时长表达式
+   * 在链的最外层求值一次，里层的调用不重新算，也就不会因为一条语句里出现两次
+   * `@` 而拿错值。离开链时恢复原样，函数体里的 `@` 因此不会漏到调用者身上。
+   */
+  let chainTime = null;
+
+  /** 这次调用被 `@` 指定的时长，或 `null`（这条语句没有 `@`，或这个调用不在链上）。 */
+  function timeOf(node) {
+    return node.timed && chainTime !== null ? chainTime : null;
+  }
+
+  /**
+   * 把 `@` 的时长写进一次调用的实参，没有 `@` 时原样返回。
+   *
+   * 每个调用点都有自己的参数表（对象方法、舞台方法、批量调用、脚本函数），
+   * 收在这里是为了让它们对 `@` 的处理一字不差：同一条消息、同一处报错。
+   */
+  function withCallTime(spec, args, callable, node) {
+    const ms = timeOf(node);
+    if (ms === null) {
+      return { args };
+    }
+    const timed = applyTimeArg(spec, args, ms, callable);
+    return timed.error ? errorAt(timed.error.message, node) : timed;
+  }
+
   /** How many calls the statement running right now is nested inside. */
   let depth = 0;
 
@@ -2879,8 +3158,19 @@ export async function interpret(program, runtime = {}) {
   /** How many recorded answers a replay has consumed. */
   let replayed = 0;
 
-  /** Whether the run has reached the saved node and is performing for real. */
-  let live = !replay;
+  /**
+   * Whether the run is racing to a `# debug::com.player.skip` mark.
+   *
+   * A player that starts on a marked script travels the same way a replay does —
+   * silently, with no line waiting for a click and no time passing — and only
+   * turns live at the mark, so what the author sees from there on is the scene
+   * performed at normal pace. Unlike a replay, nothing is recorded and no saved
+   * answer is consulted: a question on the way is put to the player as usual.
+   */
+  let fastForwarding = runtime.fastForward === true;
+
+  /** Whether the run is performing for real, rather than travelling. */
+  let live = !replay && !fastForwarding;
 
   /**
    * Whether this run is travelling to a moment to be looked at.
@@ -2896,6 +3186,16 @@ export async function interpret(program, runtime = {}) {
 
   /** Called when the run reaches its node; the stage stops replaying there. */
   const onLive = runtime.onLive ?? null;
+
+  /**
+   * Reports each debug command the run walks over, so a host can act on it.
+   *
+   * The command is a mark in the script, not an instruction to the scene: the
+   * host is the one that knows what "export this stretch" or "the player may
+   * start showing here" means. Answering `{ stop: true }` ends the run at the
+   * mark, which is how an export stops at `debug::com.export.break`.
+   */
+  const onDebug = runtime.onDebug ?? null;
 
   /**
    * How many statements this run has performed, against `MAX_STATEMENTS`.
@@ -2946,8 +3246,11 @@ export async function interpret(program, runtime = {}) {
     return result;
   }
   // Still replaying means the run ended before it reached the saved node: the
-  // host reports that rather than pretending the load worked.
-  return { value, replayMissed: Boolean(replay) };
+  // host reports that rather than pretending the load worked. Still racing
+  // towards a `player.skip` mark means the same thing for a debug run — the
+  // whole scene went by silently, so saying nothing would look like a stage
+  // that simply refused to play.
+  return { value, replayMissed: Boolean(replay), skipMissed: Boolean(fastForwarding) };
 
   /**
    * Performs a list of statements, with everything they start reported into
@@ -3000,12 +3303,10 @@ export async function interpret(program, runtime = {}) {
           // script stands at, so it is not a place to save either.
           canSave: !inFunction && cueDepth === 0,
         };
-        if (!live) {
-          if (nodeKey(at.file, here) === replay.target) {
-            live = true;
-            replay = null;
-            onLive?.(at);
-          }
+        if (!live && replay && nodeKey(at.file, here) === replay.target) {
+          live = true;
+          replay = null;
+          onLive?.(at);
         }
         if (live) {
           // The statement goes along with its position: a caller that wants to
@@ -3014,6 +3315,23 @@ export async function interpret(program, runtime = {}) {
           // only which list it came from. The save system reads `at` and must
           // not see the node, so it is a second argument rather than a field.
           onNode?.(at, statement);
+        }
+
+        // A debug command does nothing to the scene: it marks a place for the
+        // host — where a fast-forward starts showing, where an export begins
+        // and ends. A run that set off early turns live at `player.skip`, since
+        // the picture standing on the stage there is the one to watch from.
+        if (statement.type === "debug") {
+          const outcome = onDebug?.(statement, at) ?? null;
+          if (fastForwarding && statement.target === "player" && statement.command === "skip") {
+            fastForwarding = false;
+            live = true;
+            onLive?.(at);
+          }
+          if (outcome && outcome.stop) {
+            return { stopped: true };
+          }
+          continue;
         }
 
         if (statement.type === "cue") {
@@ -3157,6 +3475,11 @@ export async function interpret(program, runtime = {}) {
               const reason = error instanceof Error ? error.message : String(error);
               return errorAt(`读不到脚本 ${path}：${reason}`, statement);
             }
+            // 空白的被包含脚本：解析器只能说「第 1 行需要一个值」，那句报在
+            // 谁的头上都看不出来。指回写 include 的这一行更有用。
+            if (String(source ?? "").trim() === "") {
+              return errorAt(`被包含的脚本 ${path} 是空的，没有可以执行的语句`, statement);
+            }
             const scanned = tokenize(source);
             if (scanned.error) {
               return { error: { ...scanned.error, file: path } };
@@ -3242,10 +3565,12 @@ export async function interpret(program, runtime = {}) {
             labels.push(shown.value);
           }
           let picked;
-          if (!live) {
+          if (replay) {
             // A replay follows the answers the save recorded: the branch taken
             // then has to be the branch taken now, or the two scripts are not
-            // the same script and resuming would land somewhere else.
+            // the same script and resuming would land somewhere else. A run
+            // racing to a debug mark is not a replay: the question is the
+            // player's to answer, since the mark is beyond it either way.
             const record = replay.choices[replayed];
             if (!record || record.key !== nodeKey(at.file, here)) {
               return errorAt("存档与当前剧本对不上：选择支的位置不同", statement);
@@ -3670,6 +3995,25 @@ export async function interpret(program, runtime = {}) {
       case "call":
         return await evaluateCall(node, env, rt);
 
+      // `ch.move(30, 50) @ 3000`：时长算一次，链上每个方法各取一次（见 `timeOf`）。
+      case "chainTime": {
+        const measured = await evaluate(node.ms, env, rt);
+        if (aborted(measured)) {
+          return measured;
+        }
+        const ms = measured.value;
+        if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) {
+          return errorAt("@ 需要不小于 0 的毫秒数", node);
+        }
+        const outer = chainTime;
+        chainTime = ms;
+        try {
+          return await evaluate(node.body, env, rt);
+        } finally {
+          chainTime = outer;
+        }
+      }
+
       case "binary":
         return await evaluateBinary(node, env, rt);
 
@@ -3750,12 +4094,18 @@ export async function interpret(program, runtime = {}) {
       }
     }
 
+    // 时长在对象摘出来以后才填：没有冒号时末尾的对象本来就可能排在 time 那一格
+    // 后面，先填会把一个对象当成时间参数（`stage.scale(2, ch) @ 1000`）。
+    const timed = withCallTime(spec, resolved.args, `stage.${english}`, node);
+    if (aborted(timed)) {
+      return timed;
+    }
     return applyOnEach(
       stageValue,
       sources,
       name,
       english,
-      resolved.args,
+      timed.args,
       node,
       `stage.${english}`,
     );
@@ -3796,6 +4146,10 @@ export async function interpret(program, runtime = {}) {
   async function callTwoLists(stageApi, name, english, args, named, node, env, rt) {
     if (named.length) {
       return errorAt(`${name} 不接受参数名`, node);
+    }
+    // 两组对象之间没有参数的位置，也就没有时间可填。
+    if (timeOf(node) !== null) {
+      return errorAt(`${name} 没有时间参数，不能用 @ 指定时长`, node);
     }
     const method = stageApi?.[english];
     if (typeof method !== "function") {
@@ -3846,11 +4200,16 @@ export async function interpret(program, runtime = {}) {
     if (node.objects?.length) {
       return errorAt(`${name} 的对象就是组里的成员，冒号后面不用再写对象`, node);
     }
-    const resolved = applyNamedArgs(BULK_METHODS[english], args, named, name, node);
+    const spec = BULK_METHODS[english];
+    const resolved = applyNamedArgs(spec, args, named, name, node);
     if (resolved.error) {
       return errorAt(resolved.error.message, node);
     }
-    return applyOnEach(group, [group], name, english, resolved.args, node);
+    const timed = withCallTime(spec, resolved.args, name, node);
+    if (aborted(timed)) {
+      return timed;
+    }
+    return applyOnEach(group, [group], name, english, timed.args, node);
   }
 
   /**
@@ -3969,6 +4328,10 @@ export async function interpret(program, runtime = {}) {
         if (named.length) {
           return errorAt(`${candidate} 不接受参数名`, node);
         }
+        // 语言自己的函数没有时间参数：`str(1) @ 500` 是写错了地方。
+        if (timeOf(node) !== null) {
+          return errorAt(`${candidate} 没有时间参数，不能用 @ 指定时长`, node);
+        }
         return invoke(BUILTINS[candidate], undefined, args, node);
       }
     }
@@ -3992,7 +4355,11 @@ export async function interpret(program, runtime = {}) {
     if (resolved.error) {
       return errorAt(resolved.error.message, node);
     }
-    return invoke(method, stageApi ?? undefined, resolved.args, node);
+    const timed = withCallTime(spec, resolved.args, candidate, node);
+    if (aborted(timed)) {
+      return timed;
+    }
+    return invoke(method, stageApi ?? undefined, timed.args, node);
   }
 
   /**
@@ -4006,7 +4373,11 @@ export async function interpret(program, runtime = {}) {
     if (resolved.error) {
       return errorAt(resolved.error.message, node);
     }
-    return invoke(factory, undefined, [resolved.args, context], node);
+    const timed = withCallTime(spec, resolved.args, candidate, node);
+    if (aborted(timed)) {
+      return timed;
+    }
+    return invoke(factory, undefined, [timed.args, context], node);
   }
 
   /**
@@ -4052,7 +4423,11 @@ export async function interpret(program, runtime = {}) {
     if (resolved.error) {
       return errorAt(resolved.error.message, node);
     }
-    return invoke(method, receiver.value, resolved.args, node);
+    const timed = withCallTime(spec, resolved.args, english, node);
+    if (aborted(timed)) {
+      return timed;
+    }
+    return invoke(method, receiver.value, timed.args, node);
   }
 
   /**
@@ -4166,15 +4541,22 @@ export async function interpret(program, runtime = {}) {
    * rather than needing to be carried along.
    */
   async function callFunction(fn, args, node) {
-    if (args.length !== fn.params.length) {
-      return errorAt(`${fn.name} 需要 ${fn.params.length} 个参数，收到 ${args.length} 个`, node);
+    // 脚本函数也可能有时间参数：形参里有一个叫 `time` 的，`@` 就落在它上面。
+    // 没有这个形参就是没有时间参数，报的错与舞台方法一致。
+    const timed = withCallTime(fn.params, args, fn.name, node);
+    if (aborted(timed)) {
+      return timed;
+    }
+    const given = timed.args;
+    if (given.length !== fn.params.length) {
+      return errorAt(`${fn.name} 需要 ${fn.params.length} 个参数，收到 ${given.length} 个`, node);
     }
     if (depth >= MAX_CALL_DEPTH) {
       return errorAt(`调用层数过深（超过 ${MAX_CALL_DEPTH} 层）`, node);
     }
 
     const locals = new Map();
-    fn.params.forEach((param, index) => locals.set(param, args[index]));
+    fn.params.forEach((param, index) => locals.set(param, given[index]));
 
     depth += 1;
     callSerial += 1;
@@ -4514,6 +4896,12 @@ export async function run(source, runtime = {}) {
   for (let depth = 0; depth <= MAX_INCLUDE_DEPTH; depth += 1) {
     let program = currentFile ? scenes.get(currentFile) : null;
     if (!program) {
+      // 空剧本没有第一条语句可以责备：解析器只会报「第 1 行：这里需要一个值」，
+      // 那句话让人去第一行找错，而错的其实是「一个字符都没有」。读到的文件被
+      // 清空、或运行拿到的是空文本时，说清楚比猜位置有用。
+      if (String(currentSource ?? "").trim() === "") {
+        return { error: { message: "脚本内容为空，没有可以执行的语句", line: 1, column: 1 } };
+      }
       const scanned = tokenize(currentSource);
       if (scanned.error) {
         return scanned;

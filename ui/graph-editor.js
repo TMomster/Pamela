@@ -1468,7 +1468,7 @@ export function normalizeGraph(graph) {
  * The first object nodes called their variable `name`, which is now the
  * behaviour table's word for a *method*; a file from that era carries
  * `params.name` and no `objectName`, and reading it as-is emitted
- * `# 角色名无效: ""` even though the box on screen showed a name — because what
+ * `// 角色名无效: ""` even though the box on screen showed a name — because what
  * it showed was the field's default, not the model.
  */
 export function migrateObjectNames(graph) {
@@ -1931,10 +1931,10 @@ function declarationLines(declareNode, typeNode) {
   const ident = objectNameOf(declareNode);
   const written = declareNode.params?.objectName;
   if (!ident) {
-    return [`# 对象名无效: ${quote(written)}`];
+    return [`// 对象名无效: ${quote(written)}`];
   }
   if (!typeNode) {
-    return [`# ${ident} 还没有接上类型（用 赋值 接到 角色 / 背景 / 音频）`];
+    return [`// ${ident} 还没有接上类型（用 赋值 接到 角色 / 背景 / 音频）`];
   }
   const type = objectTypeOf(typeNode);
   const p = typeNode.params ?? {};
@@ -2115,14 +2115,14 @@ function statementsFor(node, dataExprOf) {
     case "SetVar": {
       const ident = asIdent(p.name);
       if (!ident) {
-        return [`# 变量名无效: ${quote(p.name)}`];
+        return [`// 变量名无效: ${quote(p.name)}`];
       }
       const value = dataExprOf(node.id, 0) || (p.value ?? "null");
       return [`${ident} = ${value}`];
     }
     case "FuncCall": {
       const name = asIdent(p.name);
-      if (!name) return [`# 函数名无效: ${quote(p.name)}`];
+      if (!name) return [`// 函数名无效: ${quote(p.name)}`];
       return [`${name}(${String(p.args ?? "").trim()})`];
     }
     case "Return": {
@@ -2501,7 +2501,7 @@ export function inferGraph(graph) {
       // A name nothing declares would be a runtime error, so it is reported at
       // the place it is used rather than left for the script to fail on.
       if (!declarationNamed(graph, ident, node)) {
-        lines.push(`${indent(depth)}# ${ident} 没有对应的「新对象」定义`);
+        lines.push(`${indent(depth)}// ${ident} 没有对应的「新对象」定义`);
       }
       lines.push(`${indent(depth)}${ident}${chain.map((b) => behaviorCall(b)).join("")}`);
       return;
@@ -2541,17 +2541,17 @@ export function inferGraph(graph) {
       if (node.type === "RouteSet") {
         const name = String(node.params?.name ?? "").trim();
         if (!name) {
-          lines.push("# 路由名无效");
+          lines.push("// 路由名无效");
           break;
         }
         const getters = routeGetters.get(name) ?? [];
         if (getters.length !== 1) {
-          lines.push(`# 路由${getters.length ? "重名" : "未配对"}: ${name}`);
+          lines.push(`// 路由${getters.length ? "重名" : "未配对"}: ${name}`);
           break;
         }
         const getter = getters[0];
         if (getter.parent) {
-          lines.push(`# 路由不能放进容器: ${name}`);
+          lines.push(`// 路由不能放进容器: ${name}`);
           break;
         }
         cur = targetOf(getter.id, 0);
@@ -2580,7 +2580,7 @@ export function inferGraph(graph) {
   for (const node of nodes) {
     if (node.type !== "RouteSet" && node.type !== "RouteGet") continue;
     if (node.parent) {
-      lines.push(`# 路由不能放进容器: ${String(node.params?.name ?? "").trim()}`);
+      lines.push(`// 路由不能放进容器: ${String(node.params?.name ?? "").trim()}`);
     }
   }
   // A behaviour with no object is not in the flow at all — nothing would call
@@ -2588,7 +2588,7 @@ export function inferGraph(graph) {
   for (const node of nodes) {
     if (!isBehaviorNode(node.type)) continue;
     if (node.behaviorOf) continue;
-    lines.push(`# 行为没有连到对象: ${behaviorMethodOf(node.type) ?? "?"}`);
+    lines.push(`// 行为没有连到对象: ${behaviorMethodOf(node.type) ?? "?"}`);
   }
   // A function body is a definition too: it is emitted with the declarations,
   // above the main line, never as a step of it.

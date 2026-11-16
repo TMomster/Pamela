@@ -65,6 +65,14 @@ const VERTICAL = { top: "flex-start", middle: "center", bottom: "flex-end" };
 /** How long a fully revealed line waits in skip (fast-forward) mode, in ms. */
 const SKIP_DELAY = 0;
 
+/**
+ * 自动播放时每句结束后的停顿，默认 800 毫秒。
+ *
+ * 一句说完（文字显示完、语音播放完，取较晚的那个）不该立刻跳走，否则玩家来不及
+ * 看完；`stage.autoPause(0)` 关掉这口气，让下一句紧接着开始。
+ */
+const DEFAULT_AUTO_PAUSE = 800;
+
 /** 项目级打字机档位 → 每字毫秒。0 = 不逐字（整行直接出现）。 */
 const TYPEWRITER_MS = { off: 0, fast: 20, medium: 40, slow: 70 };
 
@@ -152,10 +160,11 @@ export function mergeStyles(base, config) {
  * @param {(path: string) => Promise<string>} options.resolveAsset
  * @param {(message: string) => void} [options.onError]
  * @returns {{ node: HTMLElement, line: (name: string | null, text: string) => Promise<void>,
+ *   appendLine: (name: string | null, text: string) => Promise<void>,
  *   clickWait: (time: number) => Promise<void>,
  *   sample: (name: string | null, text: string) => void, setStyle: (config?: object) => void,
  *   setVisible: (visible: boolean) => void, clear: () => void, settle: () => boolean,
- *   isWaiting: () => boolean }}
+ *   setAutoPause: (ms?: number) => void, isWaiting: () => boolean }}
  */
 export function createDialogue({
   element,
@@ -181,6 +190,9 @@ export function createDialogue({
   getAutoVoice = () => false,
   // 合成自动配音效果音：返回 { duration, stop }。仅当 getAutoVoice() 为真时调用。
   synthVoice = () => ({ duration: 0, stop() {} }),
+  // 每次鼠标左键点在画面上时先调用一次，宿主用它把正在播的动画与帷幕落到终态
+  // （见 `stage.js` 的 `finishPlaying`），然后才轮到 `settle` 推进台词。
+  onAdvance = () => {},
   // The designer draws the plate on its own canvas and only borrows this box
   // for the text. Its preview must not add the stand-in bar over that plate.
   suppressFallback = false,
@@ -236,6 +248,9 @@ export function createDialogue({
   let waiting = null;
   // 当前句正在显示/等待的文本与 say 的 time/audio 选项，供自动播放计时读取。
   let pendingLine = "";
+  // 上一次写进框里的原文（含颜色标记）：`csay` 接着它往下写，所以留着的必须是
+  // 原文而不是去掉标记的可见文字，重排时颜色才还在。
+  let shownRaw = "";
   let currentOpts = { time: 0, audio: null };
   // 当前句正在播放的配音中断句柄（显式 `audio` 或自动配音效果音）；
   // 切句 / 手动推进 / 清场时调用，确保语音不会残留在下一句。
@@ -269,6 +284,8 @@ export function createDialogue({
   let skip = false;
   // 自动播放手动覆盖时长（毫秒）。0 = 不覆盖，用按字数算出的本句时长。
   let autoDelay = 0;
+  // 自动播放时每句结束后的停顿（毫秒），由 `stage.autoPause(ms)` 设定。
+  let autoPause = DEFAULT_AUTO_PAUSE;
   let advanceTimer = null;
   // The lines shown this run, oldest first, for the backlog viewer. Capped so a
   // long script cannot grow it without bound; the cap drops the oldest.
@@ -606,7 +623,9 @@ export function createDialogue({
     // over, which costs nothing.
     speaker.hidden = name === null || name === undefined;
     speaker.textContent = speaker.hidden ? "" : name;
-    lineRuns = richTextRuns(line == null ? "" : line);
+    // 原文留一份：`csay` 的下一次拼接、以及回放记录的合并都要用它。
+    shownRaw = line == null ? "" : String(line);
+    lineRuns = richTextRuns(shownRaw);
     paintLine(lineRuns);
     fitText();
   };
@@ -644,11 +663,15 @@ export function createDialogue({
    * recomputing it as the text grows would make the font size jump on the way
    * in. The line is therefore laid out at its final size and revealed into it.
    *
+   * `from` is how many characters are already on screen: a `csay` appends to a
+   * line that is finished, so only the new tail is written out and the part
+   * before it stays where the player left it.
+   *
    * A speed of zero — or no speed at all, which is what a style file written
    * before this field existed answers — shows the line at once, exactly as it
    * always did.
    */
-  const reveal = (runs, speedOverride) => {
+  const reveal = (runs, speedOverride, from = 0) => {
     // 样式文件里的 `text.typeSpeed` 优先；为 0（未设）时回落到项目默认档位。
     // `speedOverride` 用于 say 的 time 参数：强制在指定时间内显示完。
     const speed =
@@ -656,7 +679,7 @@ export function createDialogue({
         ? speedOverride
         : Number(current().text.typeSpeed) || projectSpeed;
     const total = runs.reduce((sum, run) => sum + [...run.text].length, 0);
-    if (speed <= 0 || typeof setTimeout !== "function") {
+    if (speed <= 0 || typeof setTimeout !== "function" || from >= total) {
       paintLine(runs);
       fitText();
       return Promise.resolve();
@@ -664,14 +687,14 @@ export function createDialogue({
 
     paintLine(runs);
     fitText();
-    // The box is measured on the finished line; the reveal then starts from an
-    // empty one at the same font size.
+    // The box is measured on the finished line; the reveal then starts from the
+    // characters already shown, at the same font size.
     const size = text.style.fontSize;
-    paintLine(runs, 0);
+    paintLine(runs, from);
     text.style.fontSize = size;
 
     return new Promise((resolve) => {
-      let shown = 0;
+      let shown = from;
       const step = () => {
         shown += 1;
         paintLine(runs, shown);
@@ -690,8 +713,18 @@ export function createDialogue({
     });
   };
 
-  /** Remembers a performed line for the backlog viewer. */
-  const pushHistory = (name, value) => {
+  /**
+   * Remembers a performed line for the backlog viewer.
+   *
+   * `append` 的一句是接在上一句后面的：记录里也并进那一条，玩家在回放列表里
+   * 看到的就是对话框上那一整句，而不是被切碎的两截。
+   */
+  const pushHistory = (name, value, append = false) => {
+    const last = history[history.length - 1];
+    if (append && last) {
+      last.text += String(value ?? "");
+      return;
+    }
     history.push({ name: name ?? null, text: String(value ?? "") });
     if (history.length > HISTORY_LIMIT) {
       history.splice(0, history.length - HISTORY_LIMIT);
@@ -773,27 +806,28 @@ export function createDialogue({
         : speed > 0
           ? speed * chars
           : 0;
-    // 文本显示完毕后的统一停顿基准：800ms，确保用户有时间看完/听完本句。
-    const READ_PAUSE = 800;
+    // 文本显示完毕后的统一停顿：由 `stage.autoPause(ms)` 定，默认 800ms，
+    // 0 表示说完就切。四个分支用的是同一个数，这正是这个开关的意义——想看
+    // 「说完就下一句」的演出，不必为每种配音/打字机组合分别记一个数字。
     if (voiceDuration > 0) {
       // 存在配音（显式 audio 或自动配音效果音）：以「文本全部显示完毕」与
-      // 「语音播放完毕」两者中最晚完成的时刻为切换基准，再额外停顿 800ms。
-      // 这样无论语音先结束（如开启 autoVoice、音效短于逐字显示）还是文本先
-      // 结束，用户都有 800ms 余量听完并看完，不会在文字刚显示完就切到下一句。
+      // 「语音播放完毕」两者中最晚完成的时刻为切换基准，再额外停顿 autoPause
+      // 毫秒。这样无论语音先结束（如开启 autoVoice、音效短于逐字显示）还是
+      // 文本先结束，用户都有余量听完并看完。
       const waitForVoice = Math.max(0, voiceDuration - textDone);
-      return waitForVoice + READ_PAUSE;
+      return waitForVoice + autoPause;
     }
     if (currentOpts.time > 0) {
       // 仅指定 `time` 时，文本必须在该时长内显示完毕并随即切换语句，
-      // 但至少停顿 800ms 让用户读完。
-      return READ_PAUSE;
+      // 再按 autoPause 停顿让用户读完。
+      return autoPause;
     }
-    // 默认（无配音）：打字机模式 = 显示完 +0.5s；非逐字 = 每 3 字一组、每组 0.8s。
+    // 默认（无配音）：打字机模式 = 显示完 + 停顿；非逐字 = 每 3 字一组、每组停顿。
     if (speed > 0) {
-      return speed * chars + 500;
+      return speed * chars + autoPause;
     }
     const groups = Math.ceil(chars / 3);
-    return groups * 800;
+    return groups * autoPause;
   };
 
   // 实际用于排程的时长：手动 override（autoDelay>0）优先。
@@ -916,8 +950,14 @@ export function createDialogue({
   };
 
   // One listener for the whole run of the stage: a click only does something
-  // while a line is up, so there is nothing to add and remove per line.
-  element?.addEventListener("click", () => settle());
+  // while a line is up, so there is nothing to add and remove per line. It is
+  // also the player's 「下一步」 for everything that is not a line: the host
+  // lands a running animation, the opening curtain or a written `wait` first, so
+  // a click is never swallowed by a move or a pause that is still playing.
+  element?.addEventListener("click", () => {
+    onAdvance();
+    settle();
+  });
 
   /**
    * Shows one line and answers a promise that a click resolves.
@@ -928,22 +968,31 @@ export function createDialogue({
    * rather than resolved to one of them: neither reading of it is what a writer
    * meant. Thrown synchronously, so the interpreter reports it in the status
    * bar like any other script error.
+   *
+   * `append` is `csay`: the text is added to the line already on screen instead
+   * of replacing it. Everything else — the wait for a click, the audio, the
+   * auto-advance — is `say`'s own behaviour, and it is the same code here.
    */
-  const line = (name, value, opts) => {
+  const show = (name, value, opts, append) => {
     // A replay seeks a saved node: the lines before it are travelled past,
     // not read, so nothing is drawn and nothing waits — and neither auto nor
     // skip applies, because there is no line up to advance.
     if (isReplaying()) {
       return Promise.resolve();
     }
+    const added = value == null ? "" : String(value);
+    // 接在上一句后面时，框里最终显示的是「上一句 + 这一段」。这一句自己的计时、
+    // 配音与逐字都只看这一段——前一段早已显示完，不该被重放一次。
+    const before = append ? [...stripRichText(shownRaw)].length : 0;
+    const whole = append ? shownRaw + added : added;
     // A preview travels to a moment to be looked at — the frame a key plays on.
     // The line is drawn, because the dialogue box is part of the picture the
     // author is placing a path against; it just does not wait, because the click
     // that would release it is one no click occurs.
     if (isPreviewing()) {
-      render(name, value);
+      render(name, whole);
       // 对白以外的地方（回放记录、导出）拿到的都是去掉颜色标记的文字。
-      onLine?.(name ?? null, stripRichText(value == null ? "" : value));
+      onLine?.(name ?? null, stripRichText(whole));
       return Promise.resolve();
     }
     if (waiting) {
@@ -951,13 +1000,13 @@ export function createDialogue({
     }
     // 进入新一句：先中断上一句可能仍在播放的配音（保险，正常已在落终态时停过）。
     stopActiveVoice();
-    // `pendingLine` 是去掉颜色标记的可见文字：逐字节奏、按字数计时的配音与
-    // 回放记录都按它算，标记不占时间也不进记录。
-    pendingLine = stripRichText(value == null ? "" : value);
+    // `pendingLine` 是这句话新增的可见文字（`say` 就是整句，`csay` 只有接上的
+    // 一段）：逐字节奏、按字数计时的配音与回放记录都按它算，标记不占时间。
+    pendingLine = stripRichText(added);
     currentOpts = normalizeOpts(opts);
-    render(name, value);
+    render(name, whole);
     // Remembered for the backlog, which shows the lines already performed.
-    pushHistory(name, pendingLine);
+    pushHistory(name, pendingLine, append);
     onLine?.(name ?? null, pendingLine);
     // 配音（显式 audio 或自动配音效果音）与文字同时开始：在说台词的一开始就启动，
     // 而不是等逐字显示完才放——手动 / 自动模式都如此，和导出成片一致。
@@ -975,7 +1024,7 @@ export function createDialogue({
     // Once the line is fully on screen, auto or skip may advance it; until then
     // the player settles it by hand. In skip mode the reveal is cut short so the
     // line reads at once rather than typing out.
-    reveal(lineRuns, revealSpeed)
+    reveal(lineRuns, revealSpeed, before)
       .then(() => onLineReady())
       .catch(() => {});
     if (skip) {
@@ -983,6 +1032,12 @@ export function createDialogue({
     }
     return shown;
   };
+
+  /** `say`: 这一句替换掉框里的上一句。 */
+  const line = (name, value, opts) => show(name, value, opts, false);
+
+  /** `csay`: 这一句接在框里已有的文字后面，不刷新对话框。 */
+  const appendLine = (name, value, opts) => show(name, value, opts, true);
 
   /**
    * 创建一个点击位置并等待，`stage.click(time)` 的演出端。
@@ -1045,6 +1100,8 @@ export function createDialogue({
     speaker.hidden = true;
     speaker.textContent = "";
     text.textContent = "";
+    // 框里没有文字了，`csay` 也不能再接着上一句往后写。
+    shownRaw = "";
     runsPainted = false;
     text.style.fontSize = fontSize(current().text.font);
     stamp.hidden = true;
@@ -1143,6 +1200,8 @@ export function createDialogue({
   return {
     node,
     line,
+    /** `csay`: 接着框里已有的文字往后写，不刷新对话框。 */
+    appendLine,
     clickWait,
     sample,
     clear,
@@ -1186,6 +1245,16 @@ export function createDialogue({
     /** Sets how long auto mode waits after a line is revealed, in ms (0 = 用计算值). */
     setAutoDelay: (ms) => {
       autoDelay = Number(ms) || 0;
+    },
+    /**
+     * 设定自动播放时每句结束后的停顿（`stage.autoPause(ms)`）。
+     *
+     * 缺省或非法（负数、非数字）回到默认 800；`0` 是「说完立刻下一句」，不是
+     * 「用默认值」，所以这里不能用 `||` 兜底。
+     */
+    setAutoPause: (ms) => {
+      const value = Number(ms);
+      autoPause = Number.isFinite(value) && value >= 0 ? value : DEFAULT_AUTO_PAUSE;
     },
     /** Turns skip (fast-forward) on or off: revealed lines advance at once. */
     setSkip: (on) => {

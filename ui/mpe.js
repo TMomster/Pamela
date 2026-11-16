@@ -296,11 +296,16 @@ function firstWord(text) {
   return match ? match[0] : "";
 }
 
-/** Whether a line, already left-trimmed, opens a comment rather than a statement. */
+/**
+ * Whether a line, already left-trimmed, opens a comment rather than a statement.
+ *
+ * `#` is deliberately absent: it starts a debug command (`# debug::com.player.skip`),
+ * which the shorthand neither reads nor rewrites — the line is handed to the `.pe`
+ * compiler exactly as written.
+ */
 function isCommentLine(trimmedStart) {
   return (
     trimmedStart.startsWith("//") ||
-    trimmedStart.startsWith("#") ||
     trimmedStart.startsWith("/*") ||
     trimmedStart.startsWith("*")
   );

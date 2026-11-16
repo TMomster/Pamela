@@ -254,6 +254,9 @@ export async function estimateDuration({
     renderer: null,
     audioRecorder,
     voiceDuration: voiceDurationTolerant,
+    // 调试范围与真导出同一个形状：`start` / `break` 走到的时刻由演出侧写下，
+    // 估算最后按它裁剪，否则浮窗会报一段导出根本不会渲染的长度。
+    range: { startMs: null, endMs: null },
   };
 
   const drive = performance ?? createExportPerformance({ source, path, read, chooseStrategy });
@@ -303,9 +306,18 @@ export async function estimateDuration({
   const timelineMs = timelineDuration(timeline);
   const clockMs = clock.now();
   const ms = Math.max(timelineMs, clockMs);
+  // 调试范围把它裁成一段：`start` 之前不进成片，`break` 之后也不进。
+  // 先判空再转数字：`Number(null)` 是 0，会把估出来的时长截没。
+  const startMs = Number(session.range?.startMs) || 0;
+  const rawEnd = session.range?.endMs;
+  const endMs = rawEnd === null || rawEnd === undefined ? null : Number(rawEnd);
+  const spanMs = Math.max(
+    0,
+    (endMs !== null && Number.isFinite(endMs) ? endMs : ms) - startMs,
+  );
   return {
-    ms,
-    frames: framesFor(ms, fps),
+    ms: spanMs,
+    frames: framesFor(spanMs, fps),
     timelineMs,
     clockMs,
     complete: settled && !failure && clock.pending() === 0,

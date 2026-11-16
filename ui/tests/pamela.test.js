@@ -6,7 +6,15 @@ import test from "node:test";
 
 import { createChoices } from "../choice.js";
 import { createDialogue } from "../dialog.js";
-import { interpret, nodeKey, parse, run, stageNameFor, tokenize } from "../pamela.js";
+import {
+  interpret,
+  nodeKey,
+  parse,
+  run,
+  scanDebugCommands,
+  stageNameFor,
+  tokenize,
+} from "../pamela.js";
 import {
   createStage,
   createStageGlobals,
@@ -409,9 +417,35 @@ test("the tokeniser separates statements on significant newlines", () => {
 });
 
 test("the tokeniser skips whitespace and comments to end of line", () => {
-  assert.deepEqual(types("  # note\n\t a"), ["newline", "ident", "eof"]);
-  // `//` is the other way a note is written, and it ends the same way.
   assert.deepEqual(types("  // note\n\t a"), ["newline", "ident", "eof"]);
+  assert.deepEqual(types("  /* note */ a"), ["ident", "eof"]);
+});
+
+test("井号开头的行是调试命令，不再是注释", () => {
+  // 整行收成一个 `debug` 记号：名字交给解析器核对。
+  assert.deepEqual(types("# debug::com.player.skip\n"), ["debug", "newline", "eof"]);
+  const scanned = tokenize("  # debug::com.export.start\nsay(\"x\")");
+  assert.equal(scanned.error, undefined);
+  assert.equal(scanned.tokens[0].type, "debug");
+  assert.equal(scanned.tokens[0].value, "debug::com.export.start");
+  assert.equal(scanned.tokens[0].line, 1);
+  assert.equal(scanned.tokens[0].column, 3);
+});
+
+test("井号写在行中间会报错，并指向 //", () => {
+  const scanned = tokenize("a = 1 # 说明");
+  assert.ok(scanned.error, "expected an error");
+  assert.match(scanned.error.message, /行首/);
+  assert.match(scanned.error.message, /\/\//);
+});
+
+test("认不出的调试命令在解析期报错，并列出可用的名字", () => {
+  const scanned = tokenize("# debug::com.player.nope");
+  assert.equal(scanned.error, undefined);
+  const parsed = parse(scanned.tokens);
+  assert.ok(parsed.error, "expected an error");
+  assert.match(parsed.error.message, /未知的调试命令/);
+  assert.match(parsed.error.message, /debug::com\.player\.skip/);
 });
 
 test("a block comment covers what it spans, lines inside it included", () => {
@@ -480,9 +514,161 @@ test("equality is never read as an assignment", async () => {
 });
 
 test("an unrecognised character is reported rather than ignored", () => {
-  const scanned = tokenize("a @ b");
+  // `@` 已经不是这一类了：它是语句末尾的时长后缀，见下面的用例。
+  const scanned = tokenize("a $ b");
   assert.ok(scanned.error, "expected an error");
-  assert.match(scanned.error.message, /@/);
+  assert.match(scanned.error.message, /\$/);
+});
+
+test("@ 记在语句末尾，把整条调用链和时长装进一个节点", () => {
+  const parsed = parse(tokenize("ch.move(30, 50).rotate(45) @ 3000").tokens);
+  assert.equal(parsed.error, undefined);
+  const [statement] = parsed.program.statements;
+  assert.equal(statement.value.type, "chainTime");
+  assert.deepEqual(statement.value.ms, { type: "literal", value: 3000, line: 1 });
+  // 链上每个调用都带上标记：时长由它们各自按自己的参数表去填。
+  const outer = statement.value.body;
+  assert.equal(outer.timed, true);
+  assert.equal(outer.callee.name, "rotate");
+  const inner = outer.callee.object;
+  assert.equal(inner.type, "call");
+  assert.equal(inner.timed, true);
+  assert.equal(inner.callee.name, "move");
+});
+
+test("cue 的单语句形式里也认 @", () => {
+  const parsed = parse(tokenize("cue 3000 ch.move(1, 2) @ 500").tokens);
+  assert.equal(parsed.error, undefined);
+  const [statement] = parsed.program.statements;
+  assert.equal(statement.type, "cue");
+  assert.equal(statement.statements[0].value.type, "chainTime");
+});
+
+test("@ 只能接在调用后面", () => {
+  const parsed = parse(tokenize("ch @ 1000").tokens);
+  assert.ok(parsed.error);
+  assert.match(parsed.error.message, /只有方法调用才能用 @ 指定时长/);
+});
+
+test("@ 指向没有时间参数的方法时，解析器就报错", () => {
+  // 静态就认得出的方法名（参数表里没有 `time`）在解析期报出，编辑器据此画错号。
+  for (const [source, name] of [
+    ["ch.enable() @ 1000", "enable"],
+    ["ch.move(1, 2).font(20) @ 1000", "font"],
+  ]) {
+    const parsed = parse(tokenize(source).tokens);
+    assert.ok(parsed.error, source);
+    assert.match(parsed.error.message, new RegExp(`${name} 没有时间参数`), source);
+  }
+});
+
+/**
+ * 一个把每次调用的实参记下来的替身对象。
+ *
+ * 用的都是参数表里有的方法名（`move` 第 4 个是时间、`rotate` 第 2 个是时间），
+ * `@` 才找得到每种方法的 `time` 该落在哪一格。
+ */
+function recordedActor() {
+  const calls = [];
+  const constructors = {
+    Actor: () => {
+      const actor = {
+        move: (dx, dy, dz, time) => {
+          calls.push({ method: "move", dx, dy, dz, time });
+          return actor;
+        },
+        rotate: (degrees, time) => {
+          calls.push({ method: "rotate", degrees, time });
+          return actor;
+        },
+        enable: () => {
+          calls.push({ method: "enable" });
+          return actor;
+        },
+      };
+      return actor;
+    },
+    // 种类明确的对象：`Effect.play` 的参数表里没有 `time`，而方法名 `play` 本身
+    // 是有时间的（`Audio.play` 就吃时间），所以这个错只可能在运行时发现。
+    Effect: () => ({
+      kind: "Effect",
+      play: () => {
+        calls.push({ method: "play" });
+      },
+    }),
+  };
+  return { calls, constructors };
+}
+
+test("@ 把同一个时长交给链上的每个方法", async () => {
+  const { calls, constructors } = recordedActor();
+  const result = await run("a = Actor()\na.move(30, 50).rotate(45) @ 3000", { constructors });
+  assert.equal(result.error, undefined, result.error?.message);
+  // 每个方法的时间参数位置不同：`move` 是第 4 个，`rotate` 是第 2 个，都由 `@` 填。
+  assert.deepEqual(calls, [
+    { method: "move", dx: 30, dy: 50, dz: undefined, time: 3000 },
+    { method: "rotate", degrees: 45, time: 3000 },
+  ]);
+});
+
+test("@ 的时长在一条语句里只算一次", async () => {
+  const { calls, constructors } = recordedActor();
+  const result = await run("a = Actor()\nn = 1\na.move(0, 0).rotate(0) @ n + 99", {
+    constructors,
+  });
+  assert.equal(result.error, undefined, result.error?.message);
+  assert.deepEqual(
+    calls.map((call) => call.time),
+    [100, 100],
+  );
+});
+
+test("@ 与已按位置写出的时间冲突时报错", async () => {
+  const { constructors } = recordedActor();
+  const result = await run("a = Actor()\na.move(1, 2, 3, 1000) @ 3000", { constructors });
+  assert.ok(result.error);
+  assert.match(result.error.message, /move 使用了重复的时间参数/);
+});
+
+test("@ 指向没有时间参数的方法时，运行时报同样的错", async () => {
+  // `play` 这个名字在别的种类上是有时间的，只有认得出接收者的种类才知道这里没有。
+  const { constructors } = recordedActor();
+  const result = await run("a = Effect()\na.play() @ 1000", { constructors });
+  assert.ok(result.error);
+  assert.match(result.error.message, /play 没有时间参数，不能用 @ 指定时长/);
+});
+
+test("@ 也作用在舞台的批量调用上", async () => {
+  const stage = fakeStage();
+  const result = await run(
+    [
+      'ch = Character("ch.png")',
+      "ch.enable()",
+      "stage.move(30, 50 : ch) @ 700",
+      // 没有冒号时，末尾的对象不会被当成时间参数。
+      "stage.move(-30, -50, ch) @ 400",
+    ].join("\n"),
+    { globals: createStageGlobals(stage) },
+  );
+  assert.equal(result.error, undefined, result.error?.message);
+  assert.deepEqual(stage.moves, [
+    // 启用时先落在舞台中央。
+    { target: "ch", x: 0, y: 0, time: undefined },
+    { target: "ch", x: 30, y: 50, time: 700 },
+    { target: "ch", x: 0, y: 0, time: 400 },
+  ]);
+});
+
+test("脚本函数的形参里有 time 时，@ 落在它上面", async () => {
+  const result = await run('func hold(label, time) {\n  return time\n}\nx = hold("hi") @ 250');
+  assert.equal(result.error, undefined, result.error?.message);
+  assert.equal(result.value, 250);
+});
+
+test("脚本函数没有 time 形参时，@ 报错", async () => {
+  const result = await run('func hold(label) {\n  return label\n}\nx = hold("hi") @ 250');
+  assert.ok(result.error);
+  assert.match(result.error.message, /hold 没有时间参数/);
 });
 
 test("an assignment parses into an AST with the value on the right", () => {
@@ -2275,9 +2461,131 @@ test("a script can build a Background and enable it", async () => {
 
 test("an empty script runs without drawing anything", async () => {
   const stage = fakeStage();
-  const result = await run("# nothing here\n", { constructors: createStageObjects(stage) });
+  const result = await run("// nothing here\n", { constructors: createStageObjects(stage) });
   assert.equal(result.error, undefined);
   assert.deepEqual(stage.shown, []);
+});
+
+test("player.skip：起点就快进，走到标记处才转成常速演出", async () => {
+  const seen = [];
+  let live = false;
+  const result = await run(
+    ['say("前")', "wait 500", "# debug::com.player.skip", 'say("后")'].join("\n"),
+    {
+      globals: { stage: { kind: "Stage", say: (text) => seen.push({ text, live }) } },
+      sleep: () => Promise.resolve(),
+      fastForward: true,
+      onLive: () => {
+        live = true;
+      },
+    },
+  );
+
+  assert.equal(result.error, undefined);
+  // 标记走到了，就不算「整段都没显示」。
+  assert.equal(result.skipMissed, false);
+  assert.deepEqual(seen, [
+    { text: "前", live: false },
+    { text: "后", live: true },
+  ]);
+});
+
+test("player.skip：标记没走到时报告 skipMissed，因为整段都没有显示", async () => {
+  const result = await run('say("a")', {
+    globals: { stage: { kind: "Stage", say: () => {} } },
+    fastForward: true,
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.skipMissed, true);
+});
+
+test("不开快进时，标记之前的语句照常是「正在演出」", async () => {
+  const seen = [];
+  let live = true;
+  const result = await run(['say("前")', "# debug::com.player.skip", 'say("后")'].join("\n"), {
+    globals: { stage: { kind: "Stage", say: (text) => seen.push({ text, live }) } },
+    onLive: () => {
+      live = true;
+    },
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.skipMissed, false);
+  assert.deepEqual(seen, [
+    { text: "前", live: true },
+    { text: "后", live: true },
+  ]);
+});
+
+test("export.start / break 报给宿主，break 能让这一趟收工", async () => {
+  const seen = [];
+  const result = await run(
+    [
+      'say("a")',
+      "# debug::com.export.start",
+      'say("b")',
+      "# debug::com.export.break",
+      'say("c")',
+    ].join("\n"),
+    {
+      globals: { stage: { kind: "Stage", say: (text) => seen.push(text) } },
+      onDebug: (statement) => {
+        seen.push(`debug:${statement.command}`);
+        return statement.command === "break" ? { stop: true } : null;
+      },
+    },
+  );
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.stopped, true);
+  // `break` 之后的那句没有演：导出到那里就结束了。
+  assert.deepEqual(seen, ["a", "debug:start", "b", "debug:break"]);
+});
+
+test("scanDebugCommands 按行报告调试命令，认不出的名字也报出来", () => {
+  const found = scanDebugCommands(
+    [
+      'say("a")',
+      "  # debug::com.export.start",
+      "# 说明",
+      "// # debug::com.player.skip",
+      "# debug::com.player.skip",
+    ].join("\n"),
+  );
+  assert.deepEqual(
+    found.map((command) => [command.text, command.line, command.known]),
+    [
+      ["debug::com.export.start", 2, true],
+      ["说明", 3, false],
+      ["debug::com.player.skip", 5, true],
+    ],
+  );
+});
+
+test("a blank script is reported as empty, not as a missing value on line 1", async () => {
+  // 没有文本时解析器只会说「第 1 行：这里需要一个值」，那句话让人去第一行找错，
+  // 而错的是一个字都没有。运行拿到空文本（读文件被清空、编辑器还没装上文本）
+  // 时要直接说清楚。
+  for (const source of ["", "   ", "\n\n\t\n", "\uFEFF"]) {
+    const result = await run(source);
+    assert.ok(result.error, JSON.stringify(source));
+    assert.match(result.error.message, /脚本内容为空/, JSON.stringify(source));
+    assert.doesNotMatch(result.error.message, /这里需要一个值/);
+  }
+});
+
+test("an included blank file is named, and blamed on the include line", async () => {
+  const asked = [];
+  const result = await run('x = 1\ninclude "blank.pe"\ny = 2', {
+    readScene: (path) => {
+      asked.push(path);
+      return Promise.resolve("  \n");
+    },
+  });
+
+  assert.deepEqual(asked, ["blank.pe"]);
+  assert.ok(result.error);
+  assert.match(result.error.message, /blank\.pe 是空的/);
+  assert.equal(result.error.line, 2, "指回写 include 的那一行");
 });
 
 test("an undefined name is an error, not a throw", async () => {
@@ -3703,6 +4011,56 @@ test("a move over time animates; one without it jumps", () => {
     // The frame is read back before the point it is asked to reach, which is
     // what gives the browser somewhere to animate from.
     assert.deepEqual(image.log.slice(0, 2), ["style.transition", "layout"]);
+  });
+});
+
+test("a fast-forward plays a timed move without the wait", async () => {
+  await inFakeDomAsync(async () => {
+    const { stage, character } = domStage();
+    try {
+      stage.toggleSkip(true);
+      const result = await run(
+        'hero = Character("hero.png")\nhero.enable()\nhero.move(100, 0, 0, 400)',
+        { globals: createStageGlobals(stage) },
+      );
+      assert.equal(result.error, undefined, result.error?.message);
+      // The player asked to go on, not to watch: the change is already there,
+      // so there is no transition left to run.
+      assert.equal(character.childNodes[0].style.transition, "none");
+    } finally {
+      stage.toggleSkip(false);
+    }
+  });
+});
+
+test("「下一步」lands a running move and the script goes on", async () => {
+  await inFakeDomAsync(async () => {
+    const { stage, character } = domStage();
+    let finished = false;
+    const running = run(
+      'hero = Character("hero.png")\nhero.enable()\nhero.move(100, 0, 0, 5000)',
+      { globals: createStageGlobals(stage) },
+    ).then((result) => {
+      finished = true;
+      return result;
+    });
+
+    // Let the script reach the move, so the animation is really in flight.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const image = character.childNodes[0];
+    assert.match(String(image.style.transition), /left 5000ms/, "动画正在走");
+
+    // 没有台词在等，这一下仍然是「下一步」：动画直接落终态。
+    stage.advance();
+    assert.equal(image.style.transition, "none", "点击/空格把动画跳到终点");
+
+    const result = await Promise.race([
+      running,
+      new Promise((resolve) => setTimeout(() => resolve(null), 500)),
+    ]);
+    assert.ok(result, "脚本没有被五秒的动画挡住");
+    assert.equal(result.error, undefined, result.error?.message);
+    assert.equal(finished, true);
   });
 });
 

@@ -632,14 +632,14 @@ test("a 新对象 with no type says which wire is missing", () => {
   const graph = emptyGraph();
   graph.nodes.push({ id: "d1", type: "NewObject", x: 0, y: 0, params: { objectName: "ch" } });
   const code = inferGraph(graph);
-  assert.match(code, /^# ch 还没有接上类型/);
+  assert.match(code, /^\/\/ ch 还没有接上类型/);
   assert.equal(tokenize(code).error, undefined);
 });
 
 test("a definition whose name is not an identifier says so", () => {
   const { graph } = scene({ name: "3bad" });
   const code = inferGraph(graph);
-  assert.match(code, /^# 对象名无效/);
+  assert.match(code, /^\/\/ 对象名无效/);
   assert.equal(tokenize(code).error, undefined);
 });
 
@@ -719,7 +719,7 @@ test("a behaviour with no object says so instead of calling nothing", () => {
     params: {},
   });
   const code = inferGraph(graph);
-  assert.match(code, /^# 行为没有连到对象/);
+  assert.match(code, /^\/\/ 行为没有连到对象/);
   assert.equal(tokenize(code).error, undefined);
 });
 
@@ -744,7 +744,7 @@ test("a call node naming nothing declared is reported", () => {
   graph.nodes.push({ id: "b1", type: behaviorTypeName("enable"), x: 0, y: 100, behaviorOf: "c1", params: {} });
   graph.edges.push({ id: "x1", from: { node: "n1", port: 0 }, to: { node: "c1", port: 0 } });
   const code = inferGraph(graph);
-  assert.match(code, /# ghost 没有对应的「新对象」定义/);
+  assert.match(code, /\/\/ ghost 没有对应的「新对象」定义/);
   assert.equal(tokenize(code).error, undefined);
 });
 

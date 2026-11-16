@@ -358,7 +358,7 @@ test("阶段 4：未配对 / 重名 / 容器内的路由给注释", () => {
     edges: [e("1", "s", "set")],
     dataEdges: [], groups: [],
   });
-  assert.ok(unpaired.includes("# 路由未配对: r"), unpaired);
+  assert.ok(unpaired.includes("// 路由未配对: r"), unpaired);
 
   const duplicate = inferGraph({
     version: GRAPH_VERSION,
@@ -369,7 +369,7 @@ test("阶段 4：未配对 / 重名 / 容器内的路由给注释", () => {
     edges: [e("1", "s", "set")],
     dataEdges: [], groups: [],
   });
-  assert.ok(duplicate.includes("# 路由重名: r"), duplicate);
+  assert.ok(duplicate.includes("// 路由重名: r"), duplicate);
 
   const inside = inferGraph({
     version: GRAPH_VERSION,
@@ -380,7 +380,7 @@ test("阶段 4：未配对 / 重名 / 容器内的路由给注释", () => {
     edges: [e("1", "s", "i")],
     dataEdges: [], groups: [],
   });
-  assert.ok(inside.includes("# 路由不能放进容器: r"), inside);
+  assert.ok(inside.includes("// 路由不能放进容器: r"), inside);
 });
 
 // --- 阶段 5：组 ---
@@ -428,8 +428,11 @@ test("阶段 5：组规范化只保留有效成员，一个节点只属于一个
 // --- 阶段 6：反向解析共用 API 表 + 中文别名 + 往返 ---
 
 const byType = (g, type) => g.nodes.filter((n) => n.type === type);
-// 真正的报错注释形如 `# 行为没有连到对象`，而颜色 `"#fff"` 里的 `#` 不是注释。
-const hasErrorComment = (s) => String(s).split("\n").some((l) => l.trimStart().startsWith("# "));
+// 真正的报错注释形如 `// 行为没有连到对象`（`#` 现在是调试命令，不再当注释用）。
+const hasErrorComment = (s) =>
+  String(s)
+    .split("\n")
+    .some((l) => l.trimStart().startsWith("// "));
 
 test("阶段 6：两级点调用被反解为对应行为节点并往返", () => {
   const code = [

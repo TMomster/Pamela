@@ -98,70 +98,95 @@ export function createRecordingStage({
   // 随演出（录制器重建）重置。
   let autoVoiceOn = false;
   let autoVoiceSpeed = AUTOVOICE_DEFAULT_SPEED;
+  // `stage.autoPause(ms)` 在导出里落在这里：语音/文字较晚者之后要停多久，
+  // 默认与真舞台一致（800ms），0 表示说完就切。
+  let autoPauseMs = SAY_TAIL_MS;
+  // 对话框上现在是哪一句（原文与已显示字数）：`csay` 要在它后面接着写。
+  let shownRaw = "";
+  let shownRevealed = 0;
+  /**
+   * 一句台词的录制，`say` 与 `csay` 共用。
+   *
+   * `append` 的差别与真舞台一样只有一处：文字接在上一句后面，`revealed` 从上一
+   * 句的字数继续增长，也就只有新接上的一段是「打」出来的。
+   */
+  function writeLine(name, line, timing, append) {
+    const t = clock.now();
+    const piece = asText(line);
+    const raw = append ? shownRaw + piece : piece;
+    // 台词只剩看得见的字进时间线；颜色标记另存成分段，由渲染后端逐段上色。
+    const text = stripRichText(raw);
+    const runs = richTextRuns(raw);
+    const length = [...text].length;
+    const from = append ? shownRevealed : 0;
+    // 这一句要看多少字：`csay` 只算自己接上的那一段。
+    const added = [...stripRichText(piece)].length;
+    // 文本「全部显示完毕」所需的时长：与对话框里的逐字速度一致，
+    // 显式 time 直接用，否则按字数给阅读时间。
+    const textDone = holdFor(piece, timing, settings);
+    // 逐字揭示窗口：录制层把整句停留切出一段固定窗口做打字机，
+    // 它恒小于整句停留，因此只依赖 textDone，不受配音时长影响。
+    const reveal = Math.min(settings.typewriterMs, Math.max(0, textDone - 100));
+    addSet(timeline, t, "dialogue", {
+      name: asText(name),
+      text,
+      // 分段每句都写：上一句的颜色不能留在这一句上。全都没有颜色时渲染
+      // 后端仍走原来的整行路径，一个字的重排都不会变。
+      runs,
+      revealed: from,
+      visible: true,
+    });
+    if (length > from && reveal > 0) {
+      addTween(timeline, t, t + reveal, "dialogue", "revealed", from, length, {
+        quantize: "floor",
+      });
+    }
+    shownRaw = raw;
+    shownRevealed = length;
+    // 配音必须在 await 之前同步登记：保证配音严格从本句开头播放，与混音里的
+    // `at = clock.now()` 对齐；显式 audio 播放，否则看 autoVoice 是否开（合成效果音）。
+    let voiceDuration = 0;
+    if (timing.audio) {
+      onVoice?.(timing.audio);
+    } else if (autoVoiceOn) {
+      onSynth?.(added, autoVoiceSpeed);
+      // 合成效果音的跨度可按字数直接算（与 dialog.js 的 synthVoice 同公式）。
+      const count = Math.max(1, Math.ceil(added / 2));
+      voiceDuration = count * (1000 / autoVoiceSpeed);
+    }
+    // 一句的停顿点 = max(文字显示完毕, 语音播放完毕) + autoPause（默认 800ms）。
+    // 没有配音时维持原 behaviour：停留就是 textDone 本身。
+    const audioHold = (vd) => Math.max(textDone, vd) + autoPauseMs;
+    const hold = voiceDuration > 0 ? audioHold(voiceDuration) : textDone;
+    // 显式配音的时长要解码文件才能知道，且导出在录制期就得算准停顿点：
+    // 异步解析，期间画面照常显示本句，解析完再排定本句的停留。缺文件 / 解不出
+    // 直接抛错，由上层中止导出并报错（与「配音缺失即中止」的需求一致）。
+    if (timing.audio && onVoiceDuration) {
+      return (async () => {
+        let vd = 0;
+        try {
+          vd = Number(await onVoiceDuration(timing.audio)) || 0;
+        } catch (error) {
+          throw error instanceof Error
+            ? error
+            : new Error(`配音时长解析失败：${timing.audio}`);
+        }
+        return clock.wait(vd > 0 ? audioHold(vd) : textDone);
+      })();
+    }
+    return clock.wait(hold);
+  }
   return {
     setVisible(visible) {
       addSet(timeline, clock.now(), "dialogue", { visible: Boolean(visible) });
     },
     /** @returns {Promise<void>|undefined} 被 push 进 context.pending 的等待。 */
     sayLine(name, line, timing = {}) {
-      const t = clock.now();
-      const raw = asText(line);
-      // 台词只剩看得见的字进时间线；颜色标记另存成分段，由渲染后端逐段上色。
-      const text = stripRichText(raw);
-      const runs = richTextRuns(raw);
-      const length = [...text].length;
-      // 文本「全部显示完毕」所需的时长：与对话框里的逐字速度一致，
-      // 显式 time 直接用，否则按字数给阅读时间。
-      const textDone = holdFor(raw, timing, settings);
-      // 逐字揭示窗口：录制层把整句停留切出一段固定窗口做打字机，
-      // 它恒小于整句停留，因此只依赖 textDone，不受配音时长影响。
-      const reveal = Math.min(settings.typewriterMs, Math.max(0, textDone - 100));
-      addSet(timeline, t, "dialogue", {
-        name: asText(name),
-        text,
-        // 分段每句都写：上一句的颜色不能留在这一句上。全都没有颜色时渲染
-        // 后端仍走原来的整行路径，一个字的重排都不会变。
-        runs,
-        revealed: 0,
-        visible: true,
-      });
-      if (length > 0 && reveal > 0) {
-        addTween(timeline, t, t + reveal, "dialogue", "revealed", 0, length, {
-          quantize: "floor",
-        });
-      }
-      // 配音必须在 await 之前同步登记：保证配音严格从本句开头播放，与混音里的
-      // `at = clock.now()` 对齐；显式 audio 播放，否则看 autoVoice 是否开（合成效果音）。
-      let voiceDuration = 0;
-      if (timing.audio) {
-        onVoice?.(timing.audio);
-      } else if (autoVoiceOn) {
-        onSynth?.(length, autoVoiceSpeed);
-        // 合成效果音的跨度可按字数直接算（与 dialog.js 的 synthVoice 同公式）。
-        const count = Math.max(1, Math.ceil(length / 2));
-        voiceDuration = count * (1000 / autoVoiceSpeed);
-      }
-      // 一句的停顿点 = max(文字显示完毕, 语音播放完毕) + 800ms（见需求）。
-      // 没有配音时维持原 behaviour：停留就是 textDone 本身。
-      const audioHold = (vd) => Math.max(textDone, vd) + SAY_TAIL_MS;
-      const hold = voiceDuration > 0 ? audioHold(voiceDuration) : textDone;
-      // 显式配音的时长要解码文件才能知道，且导出在录制期就得算准停顿点：
-      // 异步解析，期间画面照常显示本句，解析完再排定本句的停留。缺文件 / 解不出
-      // 直接抛错，由上层中止导出并报错（与「配音缺失即中止」的需求一致）。
-      if (timing.audio && onVoiceDuration) {
-        return (async () => {
-          let vd = 0;
-          try {
-            vd = Number(await onVoiceDuration(timing.audio)) || 0;
-          } catch (error) {
-            throw error instanceof Error
-              ? error
-              : new Error(`配音时长解析失败：${timing.audio}`);
-          }
-          return clock.wait(vd > 0 ? audioHold(vd) : textDone);
-        })();
-      }
-      return clock.wait(hold);
+      return writeLine(name, line, timing, false);
+    },
+    /** `csay`：同一句接着上一句写，只把新接上的一段算成这一句。 */
+    csayLine(name, line, timing = {}) {
+      return writeLine(name, line, timing, true);
     },
     choose(labels) {
       return Promise.resolve(labels?.length ? 0 : -1);
@@ -193,6 +218,15 @@ export function createRecordingStage({
     /** 当前是否开启自动配音（导出录制侧）。 */
     getAutoVoice() {
       return autoVoiceOn;
+    },
+    /**
+     * `stage.autoPause(ms)` 在导出里落在这里：一句说完之后的停顿，默认 800。
+     *
+     * 缺省或非法值回到默认；`0` 是「说完就切」，不是「用默认值」。
+     */
+    setAutoPause(ms) {
+      const value = Number(ms);
+      autoPauseMs = Number.isFinite(value) && value >= 0 ? value : SAY_TAIL_MS;
     },
     autoWait(time) {
       return clock.wait(Number(time) || 0);

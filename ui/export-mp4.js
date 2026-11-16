@@ -114,6 +114,9 @@ export async function createVideoEncoder({ config, output, error, VideoEncoderCl
  * @param {() => boolean} options.shouldStop
  * @param {() => Promise<void>} [options.flush]
  * @param {number} [options.maxFrames]
+ * @param {() => number} [options.startTime]
+ *   从哪个时刻开始取帧（毫秒）。脚本里 `# debug::com.export.start` 之前的部分
+ *   只推进时钟：那些帧不进成片，但演出必须照常走完，起点处的画面才对。
  * @returns {Promise<number>} 渲染帧数
  */
 export function createFrameLoop({
@@ -124,6 +127,7 @@ export function createFrameLoop({
   shouldStop,
   flush = flushMicrotasks,
   maxFrames = DEFAULT_EXPORT.maxFrames,
+  startTime = () => 0,
 }) {
   return async function loop() {
     let frames = 0;
@@ -132,6 +136,15 @@ export function createFrameLoop({
         throw new Error(`导出帧数超过上限 ${maxFrames}`);
       }
       const t = clock.now();
+      // 起点之前：不取帧、不编码，只让时钟往前走。
+      if (t < (Number(startTime()) || 0)) {
+        if (shouldStop({ frames, t })) {
+          return frames;
+        }
+        clock.tick();
+        await flush();
+        continue;
+      }
       const state = cursor ? cursor.at(t) : null;
       // 渲染后端在有视频时是异步的：先等它交出画面，再编码这一帧。
       const source = await frameSource(state, t);
@@ -163,6 +176,9 @@ export function createFrameLoop({
  * @param {() => boolean} [options.shouldStopOverride]
  * @param {(progress: object) => void} [options.onProgress]
  * @param {(text: string) => void} [options.onStatus] 阶段提示（混音、收尾）
+ * @param {() => ({ startMs?: number|null, endMs?: number|null })} [options.range]
+ *   调试范围：脚本里 `# debug::com.export.start` / `break` 由演出侧记下的时刻。
+ *   `startMs` 之前的帧不编码，`endMs` 处收尾；两个都可以缺省，缺省即整段导出。
  * @param {(info: {frames: number, durationMs: number}) => Promise<object>} [options.audioTrack]
  *   帧循环结束后构建音轨；缺省表示成片不带声音
  */
@@ -184,6 +200,8 @@ export function createExporter({
   onProgress = () => {},
   onStatus = () => {},
   audioTrack = null,
+  /** 调试范围（见上）；缺省时整段导出。 */
+  range = null,
   /** 分项计时（encode / append）；null 表示不计时。 */
   metrics = null,
 }) {
@@ -192,6 +210,35 @@ export function createExporter({
   const sampleDelta = Math.round(config.timescale / config.fps);
   const frameDurationUs = Math.round(1_000_000 / config.fps);
   const progressEvery = Math.max(1, Math.round(Number(config.progressEvery) || 30));
+
+  /** 调试范围，读的是演出侧那个会被改写的对象。 */
+  const rangeOf = () => (typeof range === "function" ? range() : range) ?? {};
+  /**
+   * 起点时刻（毫秒）：之前只推进时钟，不编码。
+   *
+   * 起点是演出走到 `# debug::com.export.start` 那一刻才知道的，而在那之前
+   * 帧循环已经在跑了。所以脚本里写了这条命令（`startDeclared`）时，起点未定
+   * 的那段一律不编码；没写就从头开始。
+   */
+  const startTime = () => {
+    const { hasStart = null, startMs = null } = rangeOf();
+    if (!hasStart) {
+      return 0;
+    }
+    if (startMs === null) {
+      return Number.POSITIVE_INFINITY;
+    }
+    return Number(startMs) || 0;
+  };
+  /** 终点时刻（毫秒）：走到这里就收尾；`null` 表示导到脚本与时间线末尾。 */
+  const endTime = () => {
+    const end = rangeOf().endMs;
+    // 先判空再转数字：`Number(null)` 是 0，会把每一趟导出都截在开头。
+    if (end === null || end === undefined) {
+      return null;
+    }
+    return Number.isFinite(Number(end)) ? Number(end) : null;
+  };
 
   let cancelled = false;
   let done = false;
@@ -281,8 +328,22 @@ export function createExporter({
 
       const shouldStop = shouldStopOverride
         ? (info) => shouldStopOverride(info) || cancelled
-        : ({ t }) =>
-            cancelled || (done && clock.pending() === 0 && t >= (Number(duration()) || 0));
+        : ({ t }) => {
+            if (cancelled) {
+              return true;
+            }
+            // 调试范围给了终点：走到那里就收尾，不必等时间线上最后一段动画
+            // 演完——作者要的正是「到 break 为止」这一段的成片。
+            const end = endTime();
+            if (end !== null) {
+              return t >= end;
+            }
+            return done && clock.pending() === 0 && t >= (Number(duration()) || 0);
+          };
+
+      // 成片的时间戳从第一张真正入片的画面算起：范围起点之前那段不进文件，
+      // 所以第 0 帧必须从 0 开始，否则播放器会看到一段空白。
+      let origin = null;
 
       const loop = createFrameLoop({
         clock,
@@ -290,11 +351,15 @@ export function createExporter({
         frameSource,
         flush,
         maxFrames: config.maxFrames,
+        startTime,
         shouldStop,
         onFrame: (source, t, index) => {
+          if (origin === null) {
+            origin = t;
+          }
           const encodeFrame = async () => {
             const frame = new Frame(source, {
-              timestamp: Math.round(t * 1000), // ms → µs
+              timestamp: Math.round((t - origin) * 1000), // ms → µs
               duration: frameDurationUs,
             });
             active.encode(frame, { keyFrame: index % config.keyFrameEvery === 0 });

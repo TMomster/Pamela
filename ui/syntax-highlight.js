@@ -50,7 +50,7 @@ function escapeWithComments(text) {
   let scan = 0;
   while (scan < text.length) {
     const char = text[scan];
-    const lineComment = char === "#" || (char === "/" && text[scan + 1] === "/");
+    const lineComment = char === "/" && text[scan + 1] === "/";
     if (lineComment) {
       let end = scan;
       while (end < text.length && text[end] !== "\n") end += 1;
@@ -72,7 +72,6 @@ function escapeWithComments(text) {
     let end = scan;
     while (
       end < text.length &&
-      text[end] !== "#" &&
       !(text[end] === "/" && (text[end + 1] === "/" || text[end + 1] === "*"))
     ) {
       end += 1;
@@ -107,6 +106,9 @@ function classForToken(token, tokens, index) {
     case "string":
     case "interp":
       return "tok-string";
+    // 一整行调试命令单独一色：它不改变演出，只是给作者看的标记。
+    case "debug":
+      return "tok-debug";
     case "number":
       return "tok-number";
     case "punct":

@@ -213,13 +213,15 @@ const TRANSFORM = {
  * The members a character speaks through.
  *
  * A character is also a speaker: `name` is what the plate above the line
- * reads, and `say` shows the line and waits for a click. They are the
- * dialogue half of the object, sitting beside the stage calls and the free
- * transform, and both answer the character so the calls chain.
+ * reads, `say` shows the line and waits for a click, and `csay` appends to the
+ * line already on screen. They are the dialogue half of the object, sitting
+ * beside the stage calls and the free transform, and all three answer the
+ * character so the calls chain.
  */
 const SPEAKING_METHODS = [
   { label: "name", detail: "(姓名) 设置台词框显示的姓名" },
   { label: "say", detail: "(台词) 以这个角色说一句台词并等点击" },
+  { label: "csay", detail: "(台词) 以这个角色续说：接在对话框已有文字后面，不刷新对话框" },
 ];
 
 /**
@@ -512,6 +514,7 @@ const DIALOG_METHODS = [
   { label: "disable", detail: "() 隐藏对话框" },
   { label: "enable", detail: "() 显示对话框" },
   { label: "say", detail: "(文本, 姓名?, 时长?, 配音?) 显示一句对话并等点击；省略姓名是旁白" },
+  { label: "csay", detail: "(文本, 姓名?, 时长?, 配音?) 续说：接在对话框已有文字后面显示，不刷新对话框" },
 ];
 
 /**
@@ -586,6 +589,14 @@ export const COMPLETIONS = [
   // `say` is a name of its own and has no members for a dot to reach. It is the
   // same call as `stage.say` with the receiver left out.
   { name: "say", kind: "function", detail: "(text) 旁白：说一句台词并等点击；即 stage.say" },
+  // 续说同样是裸调用：旁白接着上一句往后写。
+  { name: "csay", kind: "function", detail: "(text) 旁白续说：接在对话框已有文字后面，不刷新对话框；即 stage.csay" },
+  // 自动播放的停顿是全局设置，写成裸调用最顺手。
+  {
+    name: "autoPause",
+    kind: "function",
+    detail: "(毫秒?) 自动播放时每句结束后的停顿，默认 800；0 关闭停顿",
+  },
   // `dialog` is not built either: it is there from the start, so `dialog.say`
   // reaches it without a variable in between. `global` says so — a name
   // matched by itself rather than through a variable, and one left out of the
@@ -626,9 +637,11 @@ export const COMPLETIONS = [
       },
       { label: "unexclude", detail: "(光源… : 对象…) 撤销同一组排除" },
       { label: "say", detail: "(text, time?, audio?) 旁白：说一句台词并等点击" },
+      { label: "csay", detail: "(text, time?, audio?) 旁白续说：台词接在对话框已有文字后面，不刷新对话框" },
       { label: "click", detail: "(time?) 创建点击位置并等待：非自动模式等点击，自动/导出模式等 time 毫秒" },
       { label: "auto", detail: "(time?) 无点击位置的计时等待，用于控制自动模式的等待时长" },
       { label: "autoVoice", detail: "(开/速度?) 自动配音：没有显式 audio 的 say 自动配一段合成音；0 或 false 关闭" },
+      { label: "autoPause", detail: "(毫秒?) 自动播放时每句结束后的停顿，默认 800；0 关闭停顿，说完就下一句" },
       { label: "pamela", detail: "() 播放约 3.5 秒的 Pamela 开场动画：黑幕淡入、图标左移、展开 Made with Pamela 并渐显项目地址、整体淡出" },
       // The stage speaks for a set of objects: one line sets up the whole
       // scene instead of repeating the call per character. The objects go after
@@ -1486,14 +1499,16 @@ function declaredFunctions(text, at) {
 }
 
 /**
- * Whether the offset sits in code rather than in a comment or a string.
+ * Whether the offset sits in code rather than in a comment, a debug command or a
+ * string.
  *
  * The whole text before the caret is walked rather than just its line, because
  * a block comment covers whatever it spans and a caret inside one may be
  * several lines below the pair of characters that opened it. The walk is in
- * step with the tokeniser: `#` and `//` end at the newline, a string ends there
- * too, and a block comment runs until it is closed — or, when it never is, to
- * the end.
+ * step with the tokeniser: `//` ends at the newline, a string ends there too, a
+ * block comment runs until it is closed — or, when it never is, to the end — and
+ * a line that starts with `#` is a debug command, which names nothing the author
+ * can be offered.
  */
 function isCode(text, at) {
   let quote = null;
