@@ -13,6 +13,7 @@ import {
   AUDIO_SAMPLE_RATE,
   buildAudioTrack,
   createAudioRecorder,
+  createVoiceDurationResolver,
   encodeAudio,
   planAudio,
   renderAudio,
@@ -87,6 +88,34 @@ test("say(text, time, 变量名) records the voice track once", () => {
   // 没建过的名字不报错，也不产生事件。
   recorder.audio.voice("没这个声音");
   assert.equal(recorder.events.length, 1);
+});
+
+test("say(text, 文件路径) 直接按文件名登记一条配音声段", () => {
+  const clock = createVirtualClock();
+  const recorder = createAudioRecorder({ clock });
+  clock.tickMs(800);
+
+  // 没有先建 Audio 变量，直接写文件路径：应补一条按路径加载的 play 事件，
+  // 并登记到 sounds，让混音阶段能排进成片。
+  const waiting = recorder.audio.voice("Audio/vo.wav");
+  assert.equal(typeof waiting.then, "function");
+
+  assert.deepEqual(
+    recorder.events.map((event) => [event.kind, event.at]),
+    [["play", 800]],
+  );
+  const sound = [...recorder.sounds.values()].find((entry) => entry.path === "Audio/vo.wav");
+  assert.ok(sound, "路径配音登记到 sounds");
+  assert.equal(sound.loop, false);
+});
+
+test("say(text, 纯单词误名) 不像路径时不误报缺文件", () => {
+  const clock = createVirtualClock();
+  const recorder = createAudioRecorder({ clock });
+  // 既没有对应变量、也不像文件名的字符串：静默跳过，不产生事件、不登记声音。
+  recorder.audio.voice("typoName");
+  assert.equal(recorder.events.length, 0);
+  assert.equal(recorder.sounds.size, 0);
 });
 
 // --- 计划 ---
@@ -697,4 +726,129 @@ test("buildAudioTrack 仅凭自动配音也能混出一条音轨", async () => {
   });
   assert.ok(built.track, "只有合成效果音也应产出音轨");
   assert.equal(built.warning, null);
+});
+
+// --- 配音时长解析（录制期算准 say 的停顿点）---
+
+test("createVoiceDurationResolver 解析出配音时长（毫秒）并按路径缓存", async () => {
+  const clock = createVirtualClock();
+  const recorder = createAudioRecorder({ clock });
+  let loads = 0;
+  const loadAudio = async () => {
+    loads += 1;
+    return new ArrayBuffer(16);
+  };
+  class FakeCtx {
+    decodeAudioData() {
+      return Promise.resolve({ duration: 1.2 });
+    }
+  }
+  const resolve = createVoiceDurationResolver({
+    audioRecorder: recorder,
+    loadAudio,
+    AudioContextClass: FakeCtx,
+  });
+  assert.equal(await resolve("Audio/vo.wav"), 1200, "秒 → 毫秒");
+  assert.equal(await resolve("Audio/vo.wav"), 1200, "同一路径命中缓存");
+  assert.equal(loads, 1, "同一路径只解码一次");
+});
+
+test("createVoiceDurationResolver 认得已声明的 Audio 变量名", async () => {
+  const clock = createVirtualClock();
+  const recorder = createAudioRecorder({ clock });
+  // 复刻解释器的调用方式：factory(参数数组, { assignee })，assignee 即变量名。
+  recorder.audio(["vo.mp3", 1], { assignee: "vo" });
+  class FakeCtx {
+    decodeAudioData() {
+      return Promise.resolve({ duration: 2 });
+    }
+  }
+  const resolve = createVoiceDurationResolver({
+    audioRecorder: recorder,
+    loadAudio: async () => new ArrayBuffer(8),
+    AudioContextClass: FakeCtx,
+  });
+  assert.equal(await resolve("vo"), 2000);
+});
+
+test("createVoiceDurationResolver 没有对应音频时抛错", async () => {
+  const clock = createVirtualClock();
+  const recorder = createAudioRecorder({ clock });
+  const resolve = createVoiceDurationResolver({
+    audioRecorder: recorder,
+    loadAudio: async () => new ArrayBuffer(8),
+  });
+  await assert.rejects(resolve("不存在的配音"), /没有对应的音频文件/);
+});
+
+test("createVoiceDurationResolver 文件读不到 / 为空时抛错", async () => {
+  const clock = createVirtualClock();
+  const recorder = createAudioRecorder({ clock });
+  class FakeCtx {
+    decodeAudioData() {
+      return Promise.resolve({ duration: 1 });
+    }
+  }
+  const resolve = createVoiceDurationResolver({
+    audioRecorder: recorder,
+    loadAudio: async () => new ArrayBuffer(0),
+    AudioContextClass: FakeCtx,
+  });
+  await assert.rejects(resolve("a.wav"), /读不到或为空/);
+});
+
+test("createVoiceDurationResolver 共享 cache 时跨解析器命中、不再读盘", async () => {
+  const clock = createVirtualClock();
+  const recorder = createAudioRecorder({ clock });
+  const shared = new Map();
+  let loads = 0;
+  const loadAudio = async () => {
+    loads += 1;
+    return new ArrayBuffer(16);
+  };
+  class FakeCtx {
+    decodeAudioData() {
+      return Promise.resolve({ duration: 1.2 });
+    }
+  }
+  const a = createVoiceDurationResolver({
+    audioRecorder: recorder,
+    loadAudio,
+    AudioContextClass: FakeCtx,
+    cache: shared,
+  });
+  const b = createVoiceDurationResolver({
+    audioRecorder: recorder,
+    loadAudio,
+    AudioContextClass: FakeCtx,
+    cache: shared,
+  });
+  assert.equal(await a("Audio/vo.wav"), 1200);
+  assert.equal(await b("Audio/vo.wav"), 1200, "第二个解析器命中共享缓存");
+  assert.equal(loads, 1, "共享缓存只解一次");
+});
+
+test("createVoiceDurationResolver 失败时清缓存、可重试", async () => {
+  const clock = createVirtualClock();
+  const recorder = createAudioRecorder({ clock });
+  let ok = false;
+  const loadAudio = async () => {
+    if (ok) {
+      return new ArrayBuffer(16);
+    }
+    throw new Error("还没就绪");
+  };
+  class FakeCtx {
+    decodeAudioData() {
+      return Promise.resolve({ duration: 1 });
+    }
+  }
+  const resolve = createVoiceDurationResolver({
+    audioRecorder: recorder,
+    loadAudio,
+    AudioContextClass: FakeCtx,
+  });
+  await assert.rejects(resolve("a.wav"), /还没就绪/);
+  ok = true;
+  assert.equal(await resolve("a.wav"), 1000, "失败清缓存后重试成功");
 });

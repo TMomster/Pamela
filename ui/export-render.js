@@ -686,6 +686,123 @@ function fitDialogueLines(ctx, shown, measureText, width, height, baseSize, lead
   };
 }
 
+/**
+ * 这一帧要画的分段（`{红}…{/红}` 解析出来的「文字 + 颜色」）。
+ *
+ * 只有带颜色的台词才有分段；返回 null 表示整行单色，调用方走原来的整行绘制。
+ *
+ * @param {object} dialogue 时间线里的台词状态。
+ * @returns {{ text: string, color: string | null }[] | null}
+ */
+function shownDialogueRuns(dialogue) {
+  const runs = Array.isArray(dialogue?.runs) ? dialogue.runs : null;
+  if (!runs || !runs.some((run) => run && run.color)) {
+    return null;
+  }
+  const whole = runs.map((run) => ({ text: String(run.text ?? ""), color: run.color ?? null }));
+  const total = whole.reduce((sum, run) => sum + [...run.text].length, 0);
+  const limit = typeof dialogue.revealed === "number" && Number.isFinite(dialogue.revealed)
+    ? Math.max(0, Math.floor(dialogue.revealed))
+    : total;
+  const shown = [];
+  let left = Math.min(total, limit);
+  for (const run of whole) {
+    if (left <= 0) {
+      break;
+    }
+    const chars = [...run.text];
+    const piece = chars.length > left ? chars.slice(0, left).join("") : run.text;
+    left -= chars.length;
+    if (piece) {
+      shown.push({ text: piece, color: run.color });
+    }
+  }
+  return shown;
+}
+
+/** 分段台词的手写断行：规则与 `wrapText` 相同，只是每段带着自己的颜色。 */
+function wrapRuns(runs, measure, maxWidth) {
+  const lines = [];
+  let line = [];
+  let lineText = "";
+  const append = (text, color) => {
+    const last = line[line.length - 1];
+    if (last && last.color === color) {
+      last.text += text;
+    } else {
+      line.push({ text, color });
+    }
+  };
+  for (const run of runs) {
+    for (const char of run.text) {
+      if (char === "\n") {
+        lines.push(line);
+        line = [];
+        lineText = "";
+        continue;
+      }
+      if (lineText && measure(lineText + char) > maxWidth) {
+        lines.push(line);
+        line = [];
+        lineText = "";
+      }
+      append(char, run.color);
+      lineText += char;
+    }
+  }
+  if (line.length || lines.length === 0) {
+    lines.push(line);
+  }
+  return lines;
+}
+
+/** `fitDialogueLines` 的分段版：折行后逐档缩小字号，直到整段放得下。 */
+function fitDialogueRuns(ctx, runs, measureText, width, height, baseSize, leadingRatio, makeFont, floor) {
+  let size = baseSize;
+  let lines = [];
+  let leading = size * leadingRatio;
+  for (let attempt = 0; attempt < 24; attempt += 1) {
+    ctx.font = makeFont(size);
+    lines = wrapRuns(runs, measureText, width);
+    leading = size * leadingRatio;
+    if (lines.length * leading <= height || size <= floor) {
+      break;
+    }
+    size = Math.max(floor, size * 0.94);
+  }
+  return {
+    lines,
+    size,
+    leading,
+    maxLines: Math.max(1, Math.floor((height + 1e-6) / leading)),
+  };
+}
+
+/**
+ * 把分段台词画到画布上：每段用自己的颜色。
+ *
+ * `at` 是一行的落笔点（与 `alignedOrigin` 同义：左对齐是起点，居中 / 右对齐
+ * 按整行宽度往回收），`baseColor` 是没有颜色的段所用的颜色。
+ */
+function paintDialogueRuns(ctx, fitted, at, baseColor, measureText) {
+  const drawn = Math.min(fitted.lines.length, fitted.maxLines);
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  for (let index = 0; index < drawn; index += 1) {
+    const pieces = fitted.lines[index];
+    const width = pieces.reduce((sum, piece) => sum + measureText(piece.text), 0);
+    let x = at.textAlign === "center"
+      ? at.x - width / 2
+      : at.textAlign === "right" ? at.x - width : at.x;
+    const y = at.y + index * fitted.leading;
+    for (const piece of pieces) {
+      ctx.fillStyle = piece.color ?? baseColor;
+      ctx.fillText(piece.text, x, y);
+      x += measureText(piece.text);
+    }
+  }
+}
+
 /** Horizontal/vertical placement inside a box, mirroring the stage's flex. */
 function alignedOrigin(box, align, valign, blockHeight) {
   const textAlign = align === "center" || align === "right" ? align : "left";
@@ -731,6 +848,20 @@ function drawBuiltInDialogue(ctx, dialogue, scale, measureText) {
   const top = box.y + (dialogue.name ? 70 : 24) * scale;
   const available = Math.max(1, box.y + box.height - top - padding * 0.5);
   const makeFont = (size) => `${size}px ${TEXT_FONT}`;
+  // 有颜色标记的台词逐段上色；没有的仍走下面那条整行绘制的路径。
+  const runs = shownDialogueRuns(dialogue);
+  if (runs) {
+    const painted = fitDialogueRuns(
+      ctx, runs, measureText, box.width - padding * 2, available,
+      textSize, 1.4, makeFont, MIN_DIALOGUE_FONT * scale,
+    );
+    ctx.font = makeFont(painted.size);
+    paintDialogueRuns(
+      ctx, painted, { x: box.x + padding, y: top, textAlign: "left" }, "#ffffff", measureText,
+    );
+    ctx.restore();
+    return;
+  }
   const fitted = fitDialogueLines(
     ctx, shownDialogueText(dialogue), measureText, box.width - padding * 2,
     available, textSize, 1.4, makeFont, MIN_DIALOGUE_FONT * scale,
@@ -782,6 +913,20 @@ function drawStyledDialogue(ctx, dialogue, scale, measureText, style, platePaint
   const baseSize = numberOr(body.font?.size, 32) * scale;
   const leadingRatio = numberOr(body.lineHeight, 1.4) || 1.4;
   const makeFont = (size) => styleFontString(body.font, size);
+  // 与舞台一致：有颜色标记的台词按段上色，没有的整行一次画完。
+  const runs = shownDialogueRuns(dialogue);
+  if (runs) {
+    const painted = fitDialogueRuns(
+      ctx, runs, measureText, box.width, box.height,
+      baseSize, leadingRatio, makeFont, MIN_DIALOGUE_FONT * scale,
+    );
+    const count = Math.min(painted.lines.length, painted.maxLines);
+    const origin = alignedOrigin(box, body.align, body.valign, count * painted.leading);
+    ctx.font = makeFont(painted.size);
+    paintDialogueRuns(ctx, painted, origin, body.font?.color ?? "#f2f2f2", measureText);
+    ctx.restore();
+    return;
+  }
   const fitted = fitDialogueLines(
     ctx, shownDialogueText(dialogue), measureText, box.width, box.height,
     baseSize, leadingRatio, makeFont, MIN_DIALOGUE_FONT * scale,
@@ -1304,9 +1449,13 @@ export function createCanvasRenderer({
       measuredText = text;
       textWidths.clear();
     }
+    // 对话框整层的可见性：`dialog.disable()` 在实时舞台上是把整层（底板 + 文字）
+    // 一起 `hidden`。这里必须同口径——只按 `visible` 藏文字、底板照画的话，禁用
+    // 后仍会留下一个空底板，成片里就成了「对话框一直显示」。
+    const dialogueVisible = groups.dialogue?.visible !== false;
     // The stage picks its slot from the name alone, so the frame does too.
     const slot = groups.dialogue?.name ? "dialog" : "narration";
-    const platePainted = Boolean(plate && hasPlate(plate, slot));
+    const platePainted = Boolean(dialogueVisible && plate && hasPlate(plate, slot));
     if (platePainted) {
       ctx.save();
       const fitted = plateScale(plate, width, height);

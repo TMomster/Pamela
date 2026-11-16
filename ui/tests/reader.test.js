@@ -275,6 +275,33 @@ test("API 对照：内置名一个不落，中文与英文各占一列", () => {
   }
 });
 
+test("帮助：开场动画与检查资源完整性都写清了效果与用法", () => {
+  const basics = readerArticle("help", "basics").body;
+  const api = readerArticle("help", "api").body;
+
+  assert.match(basics, /^## .*检查资源完整性/m, "基础使用要有独立的用法小节");
+  for (const phrase of [
+    "文件 → 检查资源完整性",
+    "项目结构完整",
+    "pamela.json.broken",
+    "scripts/main.pe",
+    "重新扫描项目（F5）",
+  ]) {
+    assert.ok(basics.includes(phrase), `完整性检查说明里缺 ${phrase}`);
+  }
+
+  for (const phrase of [
+    "stage.pamela()",
+    "舞台.开场()",
+    "3.5 秒",
+    "不接受参数",
+    "导出 MP4",
+    "读档回放",
+  ]) {
+    assert.ok(api.includes(phrase), `开场动画说明里缺 ${phrase}`);
+  }
+});
+
 test("导出 MP4 文章的小节、列表与规格代码块都能渲染", () => {
   withFakeDom(() => {
     const root = renderMarkdown(readerArticle("help", "export").body);

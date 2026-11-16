@@ -87,6 +87,60 @@ export function createAudioFactory({
     return Math.min(10, Math.max(0.1, parsed));
   };
 
+  /**
+   * 判断 `say` 的尾部字符串是「直接文件名 / 路径」还是「Audio 变量名」。
+   *
+   * 含分隔符或带扩展名的按文件处理；纯单词（如 `v1`、`旁白`）视为变量名——
+   * 查不到时静默回退到普通计时，不会误把拼写错误当成缺文件去读盘。两个文件里的
+   * 判定必须保持一致：播放舞台与导出录制都靠它区分二者。
+   */
+  const AUDIO_PATH_RE = /[\\/]|[.][A-Za-z0-9]{1,8}$/;
+  const looksLikePath = (name) =>
+    typeof name === "string" && AUDIO_PATH_RE.test(name);
+
+  /** 取一个 `<audio>` 元素的时长（毫秒），元数据就绪即答，超时 2s 答 0。 */
+  const durationOf = (element) =>
+    new Promise((resolve) => {
+      if (
+        element.duration &&
+        Number.isFinite(element.duration) &&
+        element.duration > 0
+      ) {
+        resolve(Math.round(element.duration * 1000));
+        return;
+      }
+      let done = false;
+      let guard = 0;
+      const cleanup = () => {
+        element.removeEventListener("loadedmetadata", onMeta);
+        element.removeEventListener("durationchange", onMeta);
+        clearTimeout(guard);
+      };
+      const finish = (ms) => {
+        if (done) {
+          return;
+        }
+        done = true;
+        cleanup();
+        resolve(ms);
+      };
+      const onMeta = () => finish(Math.round((element.duration || 0) * 1000));
+      element.addEventListener("loadedmetadata", onMeta);
+      element.addEventListener("durationchange", onMeta);
+      // 资源缺失时元数据可能始终不可用，需设置超时以避免无限等待。
+      guard = setTimeout(() => finish(0), 2000);
+    });
+
+  /** 停下一个 `<audio>` 元素并丢弃其 `data:` 源，释放解码缓冲。 */
+  const retireElement = (element) => {
+    element.pause();
+    element.currentTime = 0;
+    element.removeAttribute?.("src");
+    if (typeof element.load === "function") {
+      element.load();
+    }
+  };
+
   /** Builds one sound; this is the function the interpreter calls as `Audio`. */
   const factory = (args, context) => {
     const path = typeof args[0] === "string" ? args[0].trim() : "";
@@ -314,35 +368,7 @@ export function createAudioFactory({
        * 用于 say 的 audio 参数计时切换语句。
        */
       duration() {
-        return new Promise((resolve) => {
-          if (element.duration && Number.isFinite(element.duration) && element.duration > 0) {
-            resolve(Math.round(element.duration * 1000));
-            return;
-          }
-          let done = false;
-          let guard = 0;
-          // Both listeners and the timeout outlive the answer unless they are
-          // taken down here: `once` only removes the event that fired, and a
-          // voice line asks for the duration of a sound already loaded.
-          const cleanup = () => {
-            element.removeEventListener("loadedmetadata", onMeta);
-            element.removeEventListener("durationchange", onMeta);
-            clearTimeout(guard);
-          };
-          const finish = (ms) => {
-            if (done) {
-              return;
-            }
-            done = true;
-            cleanup();
-            resolve(ms);
-          };
-          const onMeta = () => finish(Math.round((element.duration || 0) * 1000));
-          element.addEventListener("loadedmetadata", onMeta);
-          element.addEventListener("durationchange", onMeta);
-          // 资源缺失时元数据可能始终不可用，需设置超时以避免无限等待。
-          guard = setTimeout(() => finish(0), 2000);
-        });
+        return durationOf(element);
       },
     };
 
@@ -359,40 +385,111 @@ export function createAudioFactory({
   };
 
   /**
+   * 为「直接按文件名引用」的配音建一条临时声轨：懒加载、自动播放，并登记到
+   * `slots`（键即路径），使 `voice` / `stopVoice` / `clear` 都能像普通变量一样对待它。
+   *
+   * @param {string} path 项目相对的音频路径。
+   * @returns {object} 与 `Audio` 变量同构的槽位项（含 `element` / `sound`）。
+   */
+  const ensurePathEntry = (path) => {
+    const existing = slots.get(path);
+    if (existing) {
+      return existing;
+    }
+    const element = document.createElement("audio");
+    element.preload = "auto";
+    element.loop = false;
+    const entry = {
+      element,
+      retired: false,
+      // 路径声轨只需时长与停止；停止即丢弃源，不残留到下一句。
+      sound: {
+        duration: () => durationOf(element),
+        stop: () => {
+          entry.retired = true;
+          retireElement(element);
+        },
+      },
+      cancelFade: null,
+      fadeToken: 0,
+      retire: () => {
+        entry.retired = true;
+        retireElement(element);
+      },
+    };
+    slots.set(path, entry);
+    // 先把槽位交出去，再异步取源；源未到之前 `duration` 已挂好元数据监听，
+    // 不会错过 `loadedmetadata`。读不到或解码不了时移除槽位，整段静默回退。
+    Promise.resolve()
+      .then(() => resolveAsset(path))
+      .then((url) => {
+        if (!url) {
+          throw new Error(`无法加载音频：${path}`);
+        }
+        if (entry.retired) {
+          return;
+        }
+        element.src = url;
+        if (!isReplaying()) {
+          const started = element.play();
+          if (started && typeof started.catch === "function") {
+            started.catch(fail);
+          }
+        }
+      })
+      .catch((error) => {
+        fail(error);
+        retireElement(element);
+        slots.delete(path);
+      });
+    return entry;
+  };
+
+  /**
    * Plays the sound held in `name` and answers how long it runs, in ms.
    *
    * This is what a `say(text, time, audio)` binds to: the line is cut when the
-   * voice track ends rather than after a fixed pause. A name that holds no
-   * sound — a typo, or a variable not built yet — answers 0 rather than
-   * throwing, so a missing voice track leaves the line on its normal timer.
+   * voice track ends rather than after a fixed pause. `name` resolves in two
+   * ways — a variable the script built an `Audio` in (priority), or, when no
+   * such variable exists and the string looks like a file, the audio file
+   * itself (so `say("…", "Audio/vo.wav")` works without a prior `Audio(…)`).
+   * A name that matches neither — a typo, or a word that is not a path — answers
+   * 0 rather than throwing, so a missing voice track leaves the line on its
+   * normal timer.
    *
-   * @param {string} name The variable the script built the sound in.
+   * @param {string} name The variable the script built the sound in, or a file path.
    * @returns {Promise<number>} The track's length in ms, or 0.
    */
   factory.voice = (name) => {
-    const entry = slots.get(String(name ?? ""));
-    if (!entry) {
+    const key = String(name ?? "");
+    const entry = slots.get(key);
+    if (entry) {
+      // Replaying a save travels past lines instead of performing them, so a
+      // voice track must not start for a line with no active listener.
+      if (!isReplaying()) {
+        entry.element.currentTime = 0;
+        const started = entry.element.play();
+        if (started && typeof started.catch === "function") {
+          started.catch(() => {});
+        }
+      }
+      return entry.sound.duration();
+    }
+    // 未注册的字符串：形如文件时按路径直接加载配音；否则（变量名拼写错误等）
+    // 静默回退到普通计时，不去误读盘。
+    if (!looksLikePath(key)) {
       return Promise.resolve(0);
     }
-    // Replaying a save travels past lines instead of performing them, so a
-    // voice track must not start for a line with no active listener.
-    if (!isReplaying()) {
-      entry.element.currentTime = 0;
-      const started = entry.element.play();
-      if (started && typeof started.catch === "function") {
-        started.catch(() => {});
-      }
-    }
-    return entry.sound.duration();
+    return ensurePathEntry(key).sound.duration();
   };
 
   /**
    * 立即停止由 `voice` 播放的配音轨，用于切句或手动推进时中断语音。
    *
    * 与 `voice` 对称：名字无对应声音时静默忽略，不抛错，让缺轨的台词按其
-   * 正常计时继续，而不是中断演出。
+   * 正常计时继续，而不是中断演出。变量与文件路径两种来源的声轨都能停。
    *
-   * @param {string} name 变量名（与 `voice` 同参）。
+   * @param {string} name 变量名或文件路径（与 `voice` 同参）。
    */
   factory.stopVoice = (name) => {
     const entry = slots.get(String(name ?? ""));

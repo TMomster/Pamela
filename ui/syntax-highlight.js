@@ -6,11 +6,27 @@ import { cueStatementIn, scanArguments, shorthandCallIn } from "./mpe.js";
 import {
   BUILTIN_GLOBALS,
   BUILTIN_METHODS,
-  BULK_METHODS,
   KEYWORDS,
+  STAGE_CALLS,
   englishNameFor,
   tokenize,
 } from "./pamela.js";
+
+/** Whether `name` is a call the stage answers to with its receiver left out. */
+function isStageCall(name) {
+  return STAGE_CALLS.has(englishNameFor(name));
+}
+
+/**
+ * Whether `name` on its own is a call rather than a value.
+ *
+ * `舞台` / `对话框` name the stage and the box themselves, so a line that says
+ * nothing else is not a call waiting for its arguments.
+ */
+function isBareCall(name) {
+  const english = englishNameFor(name);
+  return STAGE_CALLS.has(english) && english !== "stage" && english !== "dialog";
+}
 
 /** Escapes the characters that matter inside HTML text. */
 function escapeHtml(text) {
@@ -202,9 +218,10 @@ function highlightMpeLine(line) {
     }
     // A bare stage-wide method is a call the writer has only just begun: colour
     // it as the API even before its first object is typed, so `enable` is blue
-    // from the first letters rather than only once the line is finished.
+    // from the first letters rather than only once the line is finished. A name
+    // that is a value (`舞台`, `对话框`) is not a call and stays a plain name.
     const bare = /^(\s*)([\p{L}_][\p{L}\p{N}_]*)(\s*)$/u.exec(line);
-    if (bare && Object.hasOwn(BULK_METHODS, englishNameFor(bare[2]))) {
+    if (bare && isBareCall(bare[2])) {
       return escapeHtml(bare[1]) + span("tok-builtin", bare[2]) + escapeHtml(bare[3]);
     }
     return highlightPamela(line);
@@ -215,17 +232,20 @@ function highlightMpeLine(line) {
   let html = highlightPamela(line.slice(0, call.nameStart));
 
   const headEnd = call.nameStart + call.head.length;
-  // With the stage left out (`enable ch bg`) the head *is* the call, so it
-  // takes the builtin colour; otherwise it is the receiver and stays a name.
-  const headIsBuiltin =
-    BUILTIN_GLOBALS.has(englishNameFor(call.head)) ||
-    (!call.verb && Object.hasOwn(BULK_METHODS, englishNameFor(call.head)));
+  // With the stage left out (`enable ch bg`, `pamela`) the head *is* the call,
+  // so it takes the builtin colour; otherwise it is the receiver and stays a
+  // name.
+  const headIsBuiltin = isStageCall(call.head) || BUILTIN_GLOBALS.has(englishNameFor(call.head));
   html += span(headIsBuiltin ? "tok-builtin" : "tok-ident", line.slice(call.nameStart, headEnd));
 
   if (call.verb) {
     const verbStart = call.nameEnd - call.verb.length;
     html += escapeHtml(line.slice(headEnd, verbStart));
-    const verbIsBuiltin = BUILTIN_METHODS.has(englishNameFor(call.verb));
+    // `stage pamela`: a method of the stage alone is still a call, even when no
+    // object answers to that name.
+    const verbIsBuiltin =
+      BUILTIN_METHODS.has(englishNameFor(call.verb)) ||
+      (englishNameFor(call.head) === "stage" && isStageCall(call.verb));
     html += span(verbIsBuiltin ? "tok-builtin" : "tok-ident", line.slice(verbStart, call.nameEnd));
   }
 

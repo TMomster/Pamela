@@ -6993,22 +6993,36 @@ export function createStage({
   let skipHeld = false;
   const applySkip = () => box.setSkip(skipToggle || skipHeld);
 
-  // Space and Enter advance a line, the way every visual novel accepts them. The
-  // listener lives as long as the stage and does nothing while no line is up,
-  // so there is nothing to add and remove per line — and because it sits on the
-  // stage element rather than on the document, a key pressed in the editor or in
-  // a modal never advances a scene. It goes through the box's own `settle`, so a
-  // click and a key cannot disagree about finishing a reveal versus advancing.
+  /**
+   * 按住 Ctrl 的快进：与开关分开记，松开只撤掉「按住」这一路。
+   *
+   * 宿主也可以在 `document` 上监听 Ctrl，然后调用 `setSkipHold`；两条路写的是
+   * 同一个布尔值，因此同时收到不会互相抵消。
+   */
+  const holdSkip = (on) => {
+    if (skipHeld === Boolean(on)) {
+      return;
+    }
+    skipHeld = Boolean(on);
+    applySkip();
+  };
+
+  // Space, Enter and Down advance a line, the way every visual novel accepts
+  // them. The listener lives as long as the stage and does nothing while no line
+  // is up, so there is nothing to add and remove per line — and because it sits
+  // on the stage element rather than on the document, a key pressed in the
+  // editor or in a modal never advances a scene. It goes through the box's own
+  // `settle`, so a click and a key cannot disagree about finishing a reveal
+  // versus advancing.
   element.addEventListener?.("keydown", (event) => {
     // A held Ctrl fast-forwards, the way many visual novels do: press and the
     // scene races, release and it stops where it is — the deliberate toggle is
     // untouched, so it keeps racing after the key comes up.
-    if (event.key === "Control" && !skipHeld) {
-      skipHeld = true;
-      applySkip();
+    if (event.key === "Control") {
+      holdSkip(true);
       return;
     }
-    if (event.key !== " " && event.key !== "Enter") {
+    if (event.key !== " " && event.key !== "Enter" && event.key !== "ArrowDown") {
       return;
     }
     if (!box.isWaiting()) {
@@ -7018,9 +7032,8 @@ export function createStage({
     box.settle();
   });
   element.addEventListener?.("keyup", (event) => {
-    if (event.key === "Control" && skipHeld) {
-      skipHeld = false;
-      applySkip();
+    if (event.key === "Control") {
+      holdSkip(false);
     }
   });
 
@@ -7031,6 +7044,14 @@ export function createStage({
     },
     /** Shows a line, answering the promise a click resolves. */
     sayLine: box.line,
+    /**
+     * 玩家按下「下一步」：与鼠标左键点在画面上同义。
+     *
+     * 正在逐字显示的台词先落成整句，已经显示完的台词放行；没有台词在等时什么
+     * 也不做。宿主的快捷键与舞台自己的空格走的是同一个 `settle`，两边不会对
+     * 「这一下是补完还是翻页」有不同看法。
+     */
+    advance: () => box.settle(),
     /** `stage.click(time)` 的演出端：点击位置标记 + 等待点击或自动计时。 */
     clickWait: (time) => box.clickWait(time),
     /** `stage.auto(time)` 的演出端：无标记的纯计时等待。 */
@@ -7076,6 +7097,13 @@ export function createStage({
     },
     /** Whether skip is on (toggle or hold). */
     getSkip: () => box.getSkip(),
+    /**
+     * 按住 / 松开快进（Ctrl 的那一路），与 `toggleSkip` 的开关合并。
+     *
+     * 传 `true` 是按下，`false` 是松开；重复传入同一状态没有副作用，所以舞台
+     * 自己的监听器与宿主的全局快捷键可以同时看守同一个按键。
+     */
+    setSkipHold: holdSkip,
     /** The lines shown this run, oldest first, for the backlog viewer. */
     getHistory: () => box.getHistory(),
     /** Clears the backlog. */

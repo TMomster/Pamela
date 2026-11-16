@@ -2177,6 +2177,12 @@ body.is-resizing .panel--resources {
   word-break: break-word;
 }
 
+/* 台词里带颜色的行：整行包在这一层里，它自己才是 flex 列的一项、单独成块，
+   里面的分段按行内排下来。`dialog.js` 只在有 `{红}…{/红}` 时才加这一层。 */
+.dialogue__line {
+  display: block;
+}
+
 /* The auto-play countdown: a ring in the bottom-right corner that drains as the
    line waits to advance. It is built by `dialog.js` as an SVG and sized here, so
    the same mark scales with the frame instead of with the window. */

@@ -42,6 +42,18 @@ export const CHOICE_MODES = Object.freeze([
   { value: "recorded", label: "按上次运行" },
 ]);
 
+/**
+ * 文字显示速度：导出时打字机逐字揭示一段台词的总时长（毫秒）。值越大文字出得
+ * 越慢；0 表示不逐字、整行直接出现。透传给录制层（`DEFAULT_RECORDING.typewriterMs`），
+ * 只改变揭示节奏，不动整句停留与成片长度。
+ */
+export const TYPEWRITER_SPEEDS = Object.freeze([
+  { value: 0, label: "关闭（整行直接出现）" },
+  { value: 200, label: "快" },
+  { value: 420, label: "中（默认）" },
+  { value: 800, label: "慢" },
+]);
+
 /** 轮盘半径（像素）与弹出/收起动画时长（毫秒）。 */
 export const WHEEL_RADIUS = 88;
 export const WHEEL_ANIMATION_MS = 300;
@@ -136,7 +148,8 @@ export function defaultNameForEntry(projectName, entry) {
  *
  * @param {unknown} raw `AppState.export` 的原样内容
  * @returns {{resolution: string|null, fps: number|null, bitrate: number|null,
- *   keyframeSeconds: number|null, choiceMode: string|null, entry: string|null}}
+ *   keyframeSeconds: number|null, choiceMode: string|null, entry: string|null,
+ *   typewriterMs: number|null}}
  */
 export function sanitizePreferences(raw) {
   const source = raw && typeof raw === "object" ? /** @type {Record<string, unknown>} */ (raw) : {};
@@ -149,6 +162,9 @@ export function sanitizePreferences(raw) {
   const choiceMode = CHOICE_MODES.some((item) => item.value === source.choice_mode)
     ? String(source.choice_mode)
     : null;
+  const typewriterMs = TYPEWRITER_SPEEDS.some((item) => item.value === Number(source.typewriter_ms))
+    ? Number(source.typewriter_ms)
+    : null;
   const entry =
     typeof source.entry === "string" && source.entry.trim() ? source.entry.trim() : null;
   return {
@@ -157,6 +173,7 @@ export function sanitizePreferences(raw) {
     bitrate: bitrate ? bitrate.value : null,
     keyframeSeconds,
     choiceMode,
+    typewriterMs,
     entry,
   };
 }
@@ -165,9 +182,9 @@ export function sanitizePreferences(raw) {
  * 面板状态 → 偏好对象（snake_case，与 `AppState.export` 对齐）。
  *
  * @param {{resolution: string, fps: number, bitrate: number, keyframeSeconds: number,
- *   choiceMode: string, entry: string}} state
+ *   choiceMode: string, entry: string, typewriterMs: number}} state
  * @returns {{resolution: string, fps: number, bitrate: number, keyframe_seconds: number,
- *   choice_mode: string, entry: string}}
+ *   choice_mode: string, entry: string, typewriter_ms: number}}
  */
 export function preferencesOf(state) {
   return {
@@ -176,6 +193,7 @@ export function preferencesOf(state) {
     bitrate: state.bitrate,
     keyframe_seconds: state.keyframeSeconds,
     choice_mode: state.choiceMode,
+    typewriter_ms: Number(state.typewriterMs) || 0,
     entry: state.entry,
   };
 }
@@ -243,6 +261,7 @@ const remembered = {
   bitrate: BITRATES[1].value,
   keyframeSeconds: KEYFRAME_CHOICES[1],
   choiceMode: CHOICE_MODES[0].value,
+  typewriterMs: TYPEWRITER_SPEEDS.find((item) => item.label.startsWith("中"))?.value ?? 420,
 };
 
 /**
@@ -293,6 +312,7 @@ export function createExportPanel({
     bitrate: stored.bitrate ?? remembered.bitrate,
     keyframeSeconds: stored.keyframeSeconds ?? remembered.keyframeSeconds,
     choiceMode: stored.choiceMode ?? remembered.choiceMode,
+    typewriterMs: stored.typewriterMs ?? remembered.typewriterMs,
     entry: stored.entry ?? "",
   };
 
@@ -312,6 +332,7 @@ export function createExportPanel({
     bitrate: defaults.bitrate,
     keyframeSeconds: defaults.keyframeSeconds,
     choiceMode: defaults.choiceMode,
+    typewriterMs: defaults.typewriterMs,
     entry: "",
     /** 作者亲手改过文件名：换入口脚本时不再自动覆盖。 */
     nameEdited: false,
@@ -361,6 +382,9 @@ export function createExportPanel({
       timescale: fps * 1000,
       bitrate: Number(state.bitrate) || BITRATES[1].value,
       keyFrameEvery: Math.max(1, Math.round(fps * Number(state.keyframeSeconds))),
+      // 文字逐字揭示的速度：直接透传给录制层（DEFAULT_RECORDING.typewriterMs），
+      // 只影响打字机节奏，不改整句停留与成片长度。
+      typewriterMs: Number(state.typewriterMs) || 0,
       // 与导出侧的上限同一语义：一小时。
       maxFrames: Math.max(108_000, fps * 3600),
       // 进度回调的间隔：每秒视频两次，足够让进度条连续动。
@@ -513,6 +537,20 @@ export function createExportPanel({
       remember();
     });
     form.append(row("关键帧", dom.keyframe));
+
+    // 打字机逐字显示的速度：只改揭示节奏，不改整句停留与成片长度，所以不必重算时长。
+    dom.typewriter = createSelect({
+      options: TYPEWRITER_SPEEDS.map((item) => ({ value: String(item.value), label: item.label })),
+      value: String(state.typewriterMs),
+      className: "export-panel__select",
+      label: "文字显示速度",
+    });
+    dom.typewriter.addEventListener("change", () => {
+      state.typewriterMs = Number(dom.typewriter.value) || 0;
+      remembered.typewriterMs = state.typewriterMs;
+      remember();
+    });
+    form.append(row("文字显示速度", dom.typewriter));
 
     // 选择支默认固定第一项；`按上次运行` 沿用最近一次演出给出的答案。
     dom.choice = createSelect({

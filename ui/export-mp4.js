@@ -299,8 +299,9 @@ export function createExporter({
             });
             active.encode(frame, { keyFrame: index % config.keyFrameEvery === 0 });
             frame.close();
-            await flush();
-            // 编码队列不能无限堆积；output 是同步回调，flush 微任务即可让出。
+            // 编码队列积压时再让出：帧循环每帧末尾已 flush 一次，正常（队列为空）
+            // 时这里不必再等一个 setTimeout，省掉整段导出的固定定时器开销。
+            // 一旦队列超过 3，仍然逐次让出，队列不会无限堆积。
             while (active.encodeQueueSize > 3) {
               await flush();
             }

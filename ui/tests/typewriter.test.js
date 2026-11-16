@@ -67,10 +67,36 @@ function fakeElement() {
   return node;
 }
 
+/** A stand-in `<audio>` element: enough of the media API for `createAudioFactory`. */
+function fakeAudio() {
+  const node = fakeElement();
+  const listeners = {};
+  node.src = "";
+  node.duration = 0;
+  node.loop = false;
+  node.preload = "";
+  node.currentTime = 0;
+  node.play = () => Promise.resolve();
+  node.pause = () => {};
+  node.load = () => {};
+  node.addEventListener = (type, fn) => {
+    (listeners[type] ||= []).push(fn);
+  };
+  node.removeEventListener = () => {};
+  node.removeAttribute = () => {};
+  // Fires a media event so a test can mimic `loadedmetadata` without decoding.
+  node.fire = (type) => {
+    (listeners[type] || []).forEach((fn) => fn());
+  };
+  return node;
+}
+
 /** Runs `body` with a minimal `document`, so a box can be built in node. */
 function inFakeDom(body) {
   const previous = globalThis.document;
-  globalThis.document = { createElement: () => fakeElement() };
+  globalThis.document = {
+    createElement: (tag) => (tag === "audio" ? fakeAudio() : fakeElement()),
+  };
   try {
     return body();
   } finally {
@@ -216,6 +242,60 @@ test("say 计时：舞台把 audio 名字交给音频工厂", async () => {
   });
 });
 
+test("say 计时：audio 字符串形如文件时按路径直接加载配音", async () => {
+  await inFakeDom(async () => {
+    const loaded = [];
+    const created = [];
+    const originalCreate = globalThis.document.createElement;
+    globalThis.document.createElement = (tag) => {
+      const el = originalCreate(tag);
+      if (tag === "audio") {
+        created.push(el);
+      }
+      return el;
+    };
+    const stage = createStage({
+      element: fakeElement(),
+      surface: fakeElement(),
+      resolveAsset: () => Promise.resolve("data:image/png;base64,"),
+      resolveAudio: (path) => {
+        loaded.push(path);
+        return Promise.resolve("data:audio/wav;base64,UklGRg==");
+      },
+    });
+    const duration = stage.voice("Audio/vo.wav");
+    // 异步取源（跨多个微任务）后把文件交给音频元素。
+    await wait(5);
+    assert.deepEqual(loaded, ["Audio/vo.wav"], "按路径请求音频");
+    assert.equal(created.length, 1, "建了一条临时声轨");
+    assert.equal(created[0].src, "data:audio/wav;base64,UklGRg==");
+    // 模拟元数据就绪，拿到真实时长（不依赖 2s 超时）。
+    created[0].duration = 1.5;
+    created[0].fire("loadedmetadata");
+    assert.equal(await duration, 1500, "以配音时长为这一句时长");
+    stage.clear();
+  });
+});
+
+test("say 计时：audio 字符串是纯单词且非变量时不误读盘", async () => {
+  await inFakeDom(async () => {
+    const loaded = [];
+    const stage = createStage({
+      element: fakeElement(),
+      surface: fakeElement(),
+      resolveAsset: () => Promise.resolve("data:image/png;base64,"),
+      resolveAudio: (path) => {
+        loaded.push(path);
+        return Promise.resolve("data:audio/wav;base64,UklGRg==");
+      },
+    });
+    // 既不是已建变量、也不像文件名：静默回退，不去读盘。
+    assert.equal(await stage.voice("typoName"), 0);
+    assert.deepEqual(loaded, [], "非文件名不触发加载");
+    stage.clear();
+  });
+});
+
 // --- 自动配音（stage.autoVoice）---
 
 test("自动配音：开启后无 audio 的台词按字数配效果音并等待", async () => {
@@ -233,10 +313,13 @@ test("自动配音：开启后无 audio 的台词按字数配效果音并等待"
     let resolved = false;
     b.line(null, "六个字的一句").then(() => { resolved = true; }).catch(() => {});
     await wait(40);
+    // 文本瞬间显示完（typewriter:off），但配音 1000ms 后才结束，切换应再等 800ms。
     assert.equal(resolved, false, "效果音时长内不应切句");
     assert.equal(synthCalls, 1, "自动配音触发一次");
-    await wait(1100);
-    assert.equal(resolved, true, "效果音结束后切句");
+    await wait(900);
+    assert.equal(resolved, false, "效果音结束 + 800ms 停顿内仍不切句");
+    await wait(1000);
+    assert.equal(resolved, true, "效果音结束后停顿 800ms 再切句");
   });
 });
 
@@ -318,6 +401,31 @@ test("自动配音：手动推进会中断进行中的效果音", async () => {
     assert.equal(stopped, false, "尚未中断");
     b.settle();
     assert.equal(stopped, true, "手动推进中断效果音");
+  });
+});
+
+test("自动配音：音效短于逐字显示时，仍以文字显示完为基准再停顿 800ms", async () => {
+  // 复现 autoVoice 打开后的 bug：语音先结束，若按配音时长切句，文字刚显示完
+  // 就会瞬间切到下一句。修复后应以「文字显示完 / 语音播放完」两者最晚者为基准，
+  // 再额外停顿 800ms，确保用户有 800ms 余量看完并听完。
+  await inFakeDom(async () => {
+    const b = box({
+      typewriter: "slow", // 70ms/字
+      getAutoVoice: () => true,
+      // 7 字：逐字显示约 490ms；音效只有 200ms（比文字短）。
+      synthVoice: () => ({ duration: 200, stop() {} }),
+    });
+    b.setAuto(true);
+    let resolved = false;
+    b.line(null, "七字一句").then(() => { resolved = true; }).catch(() => {});
+    // 文字约 490ms 显示完，语音 200ms 已结束；切换应在 max(490, 200) + 800 ≈ 1290ms。
+    await wait(600);
+    assert.equal(resolved, false, "文字显示完前不切句");
+    await wait(300);
+    // 此时约 900ms：已超过语音结束(200ms)与文字显示完(490ms)，仍在 800ms 停顿内。
+    assert.equal(resolved, false, "显示完 +800ms 停顿内仍不切句");
+    await wait(500);
+    assert.equal(resolved, true, "文字显示完 + 800ms 停顿后切句");
   });
 });
 

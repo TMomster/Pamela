@@ -613,6 +613,68 @@ test("a styled line takes its box, font and colour from the style file", () => {
   assert.ok(calls.some((call) => call[0] === "set" && call[1] === "fillStyle" && call[2] === "#f2f2f2"));
 });
 
+test("成片里带颜色的台词按段上色，标记本身不画", () => {
+  const { calls, canvas } = fakeCanvas();
+  createCanvasRenderer({ canvas }).render({
+    dialogue: {
+      text: "红色和白色",
+      runs: [{ text: "红色", color: "red" }, { text: "和白色", color: null }],
+      revealed: 5,
+      visible: true,
+    },
+  });
+
+  const pieces = calls.filter((call) => call[0] === "fillText");
+  assert.deepEqual(pieces.map((call) => call[1]), ["红色", "和白色"]);
+  // 两段接着画：第二段的起点正好是第一段的宽度之后（假 measureText 每字 10px）。
+  assert.equal(pieces[1][2], pieces[0][2] + 20);
+
+  const colors = calls
+    .filter((call) => call[0] === "set" && call[1] === "fillStyle")
+    .map((call) => call[2]);
+  assert.ok(colors.includes("red"));
+  assert.equal(colors.at(-1), "#ffffff", "没有颜色的段用默认字色");
+});
+
+test("成片里的颜色只画到已揭示的那个字", () => {
+  const { calls, canvas } = fakeCanvas();
+  createCanvasRenderer({ canvas }).render({
+    dialogue: {
+      text: "红色和白色",
+      runs: [{ text: "红色", color: "red" }, { text: "和白色", color: null }],
+      revealed: 2,
+      visible: true,
+    },
+  });
+
+  assert.deepEqual(
+    calls.filter((call) => call[0] === "fillText").map((call) => call[1]),
+    ["红色"],
+  );
+});
+
+test("样式文件下的彩色台词用样式里的字色兜底", () => {
+  const { calls, canvas } = fakeCanvas();
+  createCanvasRenderer({ canvas, plate: dialoguePlate() }).render({
+    dialogue: {
+      name: "角色",
+      text: "红与黑",
+      runs: [{ text: "红", color: "red" }, { text: "与黑", color: null }],
+      revealed: 3,
+      visible: true,
+    },
+  });
+
+  const pieces = calls
+    .filter((call) => call[0] === "fillText" && call[1] !== "角色")
+    .map((call) => call[1]);
+  assert.deepEqual(pieces, ["红", "与黑"]);
+  const colors = calls
+    .filter((call) => call[0] === "set" && call[1] === "fillStyle")
+    .map((call) => call[2]);
+  assert.equal(colors.at(-1), "#f2f2f2", "styles.dialog.text.font.color");
+});
+
 test("a line with no name is drawn in the narration slot", () => {
   const { calls, canvas } = fakeCanvas();
   createCanvasRenderer({ canvas, plate: dialoguePlate() }).render({
@@ -633,6 +695,24 @@ test("the styled plate scales with the output resolution", () => {
   assert.ok(calls.some((call) => call[0] === "scale" && Math.abs(call[1] - 2 / 3) < 0.001));
   const line = calls.find((call) => call[0] === "fillText" && call[1] === "你好");
   assert.ok(line[3] < 720, "the text stays inside the picture");
+});
+
+test("dialog.disable hides the whole dialogue layer, plate included", () => {
+  const { calls, canvas } = fakeCanvas();
+  createCanvasRenderer({ canvas, plate: dialoguePlate() }).render({
+    dialogue: { name: "角色", text: "你好", visible: false },
+  });
+
+  assert.equal(
+    calls.some((call) => call[0] === "set" && call[1] === "fillStyle" && call[2] === "#101018"),
+    false,
+    "隐藏时不画对话框底板",
+  );
+  assert.equal(
+    calls.filter((call) => call[0] === "fillText").length,
+    0,
+    "隐藏时不写台词文字",
+  );
 });
 
 test("a style with no layers keeps a readable stand-in plate", () => {

@@ -3955,20 +3955,29 @@ test("a line is drawn on the dialogue layer, and clearing the stage takes it dow
   assert.equal(dialogue.childNodes[2].textContent, "");
 });
 
-test("Space and Enter advance a line, the way a click does", async () => {
+test("Space, Down, Enter and advance() move a line the way a click does", async () => {
   const { stage, element, spoken } = inFakeDom(() => {
     const made = domStage();
     return { ...made, spoken: made.stage.sayLine(null, "夜深了。") };
   });
 
-  // The stage hears the two keys a visual novel accepts; they go through the
-  // same settle a click does, so the two cannot disagree.
+  // The stage hears the keys a visual novel accepts; they go through the same
+  // settle a click does, so the two cannot disagree.
   element.dispatch("keydown", { key: " ", preventDefault() {} });
   await spoken;
 
   // A key with no line up is a no-op rather than an error.
   element.dispatch("keydown", { key: "Enter", preventDefault() {} });
   assert.equal(stage.isTyping(), false);
+
+  const down = stage.sayLine(null, "又一句。");
+  element.dispatch("keydown", { key: "ArrowDown", preventDefault() {} });
+  await down;
+
+  // 宿主的全局快捷键走 `advance()`，和舞台自己的键落进同一个 settle。
+  const advanced = stage.sayLine(null, "还有一句。");
+  assert.equal(stage.advance(), true);
+  await advanced;
 });
 
 test("a key that is not Space or Enter leaves the line alone", async () => {

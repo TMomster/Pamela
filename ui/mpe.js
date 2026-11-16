@@ -2,7 +2,14 @@
 // Pamela — the `.mpe` shorthand dialect.
 // 关键字不可作为赋值目标，解析阶段直接报错。
 
-import { BUILTIN_GLOBALS, BUILTIN_METHODS, BULK_METHODS, englishNameFor } from "./pamela.js";
+import {
+  BUILTIN_GLOBALS,
+  BUILTIN_METHODS,
+  BULK_METHODS,
+  STAGE_CALLS,
+  VARIADIC_CALLS,
+  englishNameFor,
+} from "./pamela.js";
 
 /** The suffix of a shorthand script. */
 export const MPE_SUFFIX = ".mpe";
@@ -72,6 +79,34 @@ const LITERALS = new Set(["true", "false", "null"]);
 /** The methods a group answers to: everything after them is an object. */
 const GROUP_METHODS = new Set(["add", "del"]);
 
+/** Whether `name` is the stage itself — the receiver that speaks for many objects. */
+function isStageName(name) {
+  return englishNameFor(name) === "stage";
+}
+
+/**
+ * Whether `name` is a word a script may call without a receiver.
+ *
+ * `.pe` resolves such a name on the stage at run time, so this is the same
+ * vocabulary `callStage` answers to: the types, the narrator, the language's own
+ * functions, the batch calls and the stage's own actions.
+ */
+function isCallName(name) {
+  const english = englishNameFor(name);
+  return BUILTIN_GLOBALS.has(english) || STAGE_CALLS.has(english);
+}
+
+/**
+ * Whether `name` is a value rather than a call — `舞台` and `对话框`.
+ *
+ * A line that says nothing but the name reads that object; compiling it as a
+ * call would turn `x = 舞台` into `x = 舞台()`, which is a different program.
+ */
+function isValueName(name) {
+  const english = englishNameFor(name);
+  return english === "stage" || english === "dialog";
+}
+
 /**
  * Whether a shorthand call names objects rather than values.
  *
@@ -79,12 +114,31 @@ const GROUP_METHODS = new Set(["add", "del"]);
  * word in either place is a name — the opposite of a line of dialogue, where
  * everything after the first word is prose. The same rule is what colours the
  * line, so the two cannot disagree.
+ *
+ * The stage stands for a set of objects too, and it is the one receiver that
+ * also spells its own calls without being written: `enable ch bg` and
+ * `stage enable ch bg` both name the objects the call is made on, and
+ * `exclude 灯1 : 小帕` names a list on each side of its colon. `verb` is empty
+ * for a call spelled by its head alone.
  */
 function readsNames(head, verb) {
-  if (englishNameFor(head) === "Array") {
+  const name = englishNameFor(head);
+  const method = englishNameFor(verb);
+  // `Array ch1 ch2`, `ay1 add ch3`: the words are objects.
+  if (name === "Array" || method === "Array" || GROUP_METHODS.has(method)) {
     return true;
   }
-  return Boolean(verb) && GROUP_METHODS.has(englishNameFor(verb));
+  // `exclude 灯1 : 小帕` — two lists, and both of them objects.
+  if (Object.hasOwn(VARIADIC_CALLS, method)) {
+    return true;
+  }
+  // With the stage left out the head *is* the method, so the rest of the line is
+  // a target list: `enable ch bg`, `排除 灯1 : 小帕`, `scale 2.0 : ch, bg`.
+  if (!verb) {
+    return Object.hasOwn(BULK_METHODS, name) || Object.hasOwn(VARIADIC_CALLS, name);
+  }
+  // Written with the stage: `stage enable ch bg`, `舞台 缩放 2.0 : 小帕`.
+  return isStageName(head) && Object.hasOwn(BULK_METHODS, method);
 }
 
 /**
@@ -155,7 +209,12 @@ function compileStatement(indent, statement) {
   if (assignment) {
     const [, name, value] = assignment;
     const called = firstWord(value);
-    if (NAME.test(called) && BUILTIN_GLOBALS.has(englishNameFor(called))) {
+    if (NAME.test(called) && isCallName(called)) {
+      // `x = 舞台` / `x = 对话框`: the whole right side is the object itself, not
+      // a call waiting for arguments.
+      if (value.length === called.length && isValueName(called)) {
+        return null;
+      }
       const call = compileCall(called, "", value.slice(called.length).trim(), {
         names: readsNames(called, ""),
       });
@@ -183,40 +242,41 @@ function compileStatement(indent, statement) {
 
   const rest = statement.slice(head.length).trim();
   if (!rest) {
-    return null;
+    // `pamela` / `开场`: a call the stage makes with no arguments at all. A name
+    // that is a value (`舞台`, `对话框`) is not a call, and neither is a plain
+    // variable — those lines already say what they mean.
+    if (!isCallName(head) || isValueName(head)) {
+      return null;
+    }
+    return `${indent}${compileCall(head, "", "")}`;
   }
 
   const verb = firstWord(rest);
+  const tail = rest.slice(verb.length).trim();
   const asMethod = NAME.test(verb) && BUILTIN_METHODS.has(englishNameFor(verb));
+  // `stage pamela`, `stage perspective true`: the second word is a method of the
+  // stage even when it is a method of no object — the opening animation, the
+  // space rulers and the two calls that take a list on each side of a colon.
+  const asStageMethod = NAME.test(verb) && isStageName(head) && STAGE_CALLS.has(englishNameFor(verb));
 
   // `dialog say …` — a receiver that shares a name with a constructor is still a
   // receiver, so the method reading wins whenever both could apply.
-  if (asMethod && NAME.test(head)) {
-    const tail = rest.slice(verb.length).trim();
+  if (asMethod || asStageMethod) {
     // `stage enable ch bg`: the stage is the receiver that speaks for several
     // objects, so its argument list is a list of names rather than prose. A
     // group's `add` / `del` name objects for the same reason.
-    const bulk =
-      (englishNameFor(head) === "stage" && Object.hasOwn(BULK_METHODS, englishNameFor(verb))) ||
-      readsNames(head, verb);
-    return `${indent}${compileCall(head, verb, tail, { names: bulk })}`;
+    return `${indent}${compileCall(head, verb, tail, { names: readsNames(head, verb) })}`;
   }
 
-  // `背景 房间.png`, `说 你好`: the first word names a call on the stage with
-  // the receiver left out — `stage.Background(…)`, `stage.say(…)` — and
-  // everything after it is its argument list. Read before the second word is
-  // judged, since a constructor's first argument is usually a file name —
-  // dots, spaces and all. `Array ch1 ch2` is the exception: its words are
-  // objects, so they are read as names.
-  if (BUILTIN_GLOBALS.has(englishNameFor(head))) {
+  // `背景 房间.png`, `说 你好`, `pamela`: the first word names a call on the
+  // stage with the receiver left out — `stage.Background(…)`, `stage.say(…)`,
+  // `stage.pamela()` — and everything after it is its argument list. Read
+  // before the second word is judged, since a constructor's first argument is
+  // usually a file name — dots, spaces and all. `Array ch1 ch2` is the
+  // exception: its words are objects, so they are read as names, and so is a
+  // stage-wide call (`enable ch bg` is `stage.enable(ch, bg)`).
+  if (isCallName(head)) {
     return `${indent}${compileCall(head, "", rest, { names: readsNames(head, "") })}`;
-  }
-
-  // `enable ch bg`: a stage-wide call with the stage left out. The word names a
-  // method the stage makes on several objects, so the rest of the line is its
-  // argument list — `enable(ch, bg)`, which is `stage.enable(ch, bg)`.
-  if (rest && Object.hasOwn(BULK_METHODS, englishNameFor(head))) {
-    return `${indent}${compileCall(head, "", rest, { names: true })}`;
   }
 
   // `count = 1`, `count += 1`, `foo(1)`: the second word is not a name, so the
@@ -227,7 +287,6 @@ function compileStatement(indent, statement) {
 
   // An unknown method name is still a method: the object may be a dictionary a
   // script filled with its own functions. The parser has the last word.
-  const tail = rest.slice(verb.length).trim();
   return `${indent}${compileCall(head, verb, tail)}`;
 }
 
@@ -258,12 +317,13 @@ function isCommentLine(trimmedStart) {
  * hit.
  *
  * The reading rules are the compiler's, in its order: an assignment whose right
- * side starts with a builtin name compiles that name as a call; then
- * `target method`, then a bare builtin, then a stage-wide call with the stage
- * left out (`enable ch bg`), then anything else with a name in the second place
- * is still a method. A line of the full syntax — a keyword, a brace, a comment,
- * a plain assignment — answers `null`, since the shorthand does not rewrite it
- * and neither should an editor helper.
+ * side starts with a call name compiles that name as a call; then
+ * `target method` — including the stage's own methods, `stage pamela` — then a
+ * call with its receiver left out (`背景 教室.png`, `enable ch bg`, `pamela`),
+ * then anything else with a name in the second place is still a method. A line
+ * of the full syntax — a keyword, a brace, a comment, a plain assignment, a name
+ * that is a value such as `舞台` — answers `null`, since the shorthand does not
+ * rewrite it and neither should an editor helper.
  *
  * A line may go on with `. method …`; `args` is still the whole run under the
  * call, while `firstArgsEnd` marks where its first call stops, which is the part
@@ -295,7 +355,11 @@ export function shorthandCallIn(line) {
   const assignment = /^([\p{L}_][\p{L}\p{N}_]*)\s*=\s*(\S[\s\S]*)$/u.exec(trimmed);
   if (assignment) {
     const called = firstWord(assignment[2]);
-    if (!NAME.test(called) || !BUILTIN_GLOBALS.has(englishNameFor(called))) {
+    if (
+      !NAME.test(called) ||
+      !isCallName(called) ||
+      (assignment[2].length === called.length && isValueName(called))
+    ) {
       return null;
     }
     assignee = assignment[1];
@@ -316,31 +380,29 @@ export function shorthandCallIn(line) {
   const verb = rest ? firstWord(rest) : "";
   const verbStart = bodyStart + head.length + (afterHead.length - afterHead.trimStart().length);
   const asMethod = Boolean(rest) && NAME.test(verb) && BUILTIN_METHODS.has(englishNameFor(verb));
-  const asGlobal = BUILTIN_GLOBALS.has(englishNameFor(head));
-  const asBulk = Boolean(rest) && Object.hasOwn(BULK_METHODS, englishNameFor(head));
+  // `stage pamela`: the second word is a method of the stage even when it is a
+  // method of no object, so the line reads exactly as the compiler reads it.
+  const asStageMethod =
+    Boolean(rest) && NAME.test(verb) && isStageName(head) && STAGE_CALLS.has(englishNameFor(verb));
+  const asCall = isCallName(head);
   // Which reading the compiler takes, in its order: a known method wins over a
-  // name that is also a constructor; a bare builtin is a call with no receiver;
-  // a stage-wide method with the stage left out is a call whose every argument
-  // is an object; and an unknown method is still a method — the parser has the
-  // last word.
+  // name that is also a constructor; otherwise the head names a call the stage
+  // makes with its receiver left out — a type, the narrator, a stage-wide call
+  // whose every argument is an object, or a name like `pamela`; and an unknown
+  // method is still a method — the parser has the last word.
   //
-  // `背景` on its own is a builtin call whose name has not been written yet, and
-  // it is exactly the line a drop is aimed at; a bare receiver with no method is
-  // not a call, so `小帕` answers null.
+  // `背景` and `pamela` on their own are calls whose arguments have not been
+  // written yet, and `背景` is exactly the line a drop is aimed at. A bare
+  // receiver with no method is not a call, so `小帕` answers null — and neither
+  // is `舞台`, which is the object itself.
   let method = false;
   if (!rest) {
-    if (!asGlobal) {
+    if (!asCall || isValueName(head)) {
       return null;
     }
-  } else if (!assignee && asMethod) {
+  } else if (!assignee && (asMethod || asStageMethod)) {
     method = true;
-  } else if (!assignee && !asGlobal && asBulk) {
-    // `enable ch bg` → `enable(ch, bg)`, i.e. `stage.enable(ch, bg)`. The head
-    // is the whole call: `ch` is the first target, not the method of `enable`.
-    // A numeric first argument (`scale 2.0 300`) is a bulk call too, so this
-    // branch has to come before the `NAME.test(verb)` check below.
-    method = false;
-  } else if (!assignee && !asGlobal) {
+  } else if (!assignee && !asCall) {
     if (!NAME.test(verb)) {
       return null;
     }
@@ -361,11 +423,7 @@ export function shorthandCallIn(line) {
   // without a verb is a builtin call (`Array ch1 ch2`) or a stage-wide call
   // with the stage left out (`enable ch bg`); an assignment with a builtin on
   // the right is a builtin call too.
-  const names =
-    (method
-      ? englishNameFor(head) === "stage" && Object.hasOwn(BULK_METHODS, englishNameFor(verb))
-      : !assignee && Object.hasOwn(BULK_METHODS, englishNameFor(head))) ||
-    readsNames(head, method ? verb : "");
+  const names = readsNames(head, method ? verb : "");
   // Where the arguments of the *first* call end. A chained line goes on with
   // `. move 0 -300`, and that belongs to the call rather than to its first
   // argument: a drop onto `背景 教室.png . 模糊 200` names the file, and the
@@ -522,8 +580,10 @@ export function scanArguments(text, { names = false } = {}) {
       continue;
     }
 
-    // A comma separates objects too: `: ch, bg` reads as `: ch bg`.
-    if (inObjects && source[index] === ",") {
+    // A comma separates objects too: `: ch, bg` reads as `: ch bg`, and so does
+    // the object list a batch call names on both sides (`enable ch, bg`). Only a
+    // list of names is read this way — in a line of dialogue a comma is prose.
+    if (names && source[index] === ",") {
       index += 1;
       continue;
     }

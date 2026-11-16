@@ -161,6 +161,20 @@ test("mpe: a group is built with names, not with a line of dialogue", () => {
   assert.match(highlightMpe("ay1 add ch3"), /<span class="tok-ident">ch3<\/span>/);
 });
 
+test("mpe: a call only the stage answers to is the API colour", () => {
+  // `pamela`（开场动画）不挂在任何对象上，两种写法都是调用。
+  assert.match(highlightMpe("pamela"), /<span class="tok-builtin">pamela<\/span>/);
+  assert.match(highlightMpe("开场"), /<span class="tok-builtin">开场<\/span>/);
+  const html = highlightMpe("stage pamela");
+  assert.match(html, /<span class="tok-ident">stage<\/span>|<span class="tok-builtin">stage<\/span>/);
+  assert.match(html, /<span class="tok-builtin">pamela<\/span>/);
+  assert.match(highlightMpe("stage perspective true"), /<span class="tok-builtin">perspective<\/span>/);
+  // 两个变长列表的冒号两边都是对象名。
+  assert.match(highlightMpe("排除 灯1 : 小帕"), /<span class="tok-ident">灯1<\/span>/);
+  // 舞台本身是名字，整行只有它不是一次调用。
+  assert.doesNotMatch(highlightMpe("舞台"), /tok-builtin/);
+});
+
 test("mpe: a cue line colours its head and the statement it starts", () => {
   const html = highlightMpe("cue 3000 ch scale 0.5");
   assert.match(html, /<span class="tok-keyword">cue<\/span>/);

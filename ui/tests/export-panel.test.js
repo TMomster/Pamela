@@ -525,6 +525,7 @@ const NO_PREFS = {
   bitrate: null,
   keyframeSeconds: null,
   choiceMode: null,
+  typewriterMs: null,
   entry: null,
 };
 
@@ -536,6 +537,7 @@ test("偏好参数只认合法值，认不出的留空而不是猜一个", () =>
       bitrate: 12_000_000,
       keyframe_seconds: 5,
       choice_mode: "recorded",
+      typewriter_ms: 200,
       entry: " scripts/ch1.pe ",
     }),
     {
@@ -544,6 +546,7 @@ test("偏好参数只认合法值，认不出的留空而不是猜一个", () =>
       bitrate: 12_000_000,
       keyframeSeconds: 5,
       choiceMode: "recorded",
+      typewriterMs: 200,
       entry: "scripts/ch1.pe",
     },
   );
@@ -571,6 +574,7 @@ test("偏好对象按后端字段名写：snake_case", () => {
     bitrate: 4_000_000,
     keyframeSeconds: 2,
     choiceMode: "first",
+    typewriterMs: 800,
     entry: "scripts/main.pe",
   }), {
     resolution: "960x540",
@@ -578,6 +582,7 @@ test("偏好对象按后端字段名写：snake_case", () => {
     bitrate: 4_000_000,
     keyframe_seconds: 2,
     choice_mode: "first",
+    typewriter_ms: 800,
     entry: "scripts/main.pe",
   });
   assert.deepEqual(
@@ -661,6 +666,30 @@ test("浮窗：参数一改就上报，供宿主写进偏好文件", async () =>
   });
 });
 
+test("浮窗：文字显示速度是一个下拉项，改动写进 value() 与偏好", async () => {
+  await withFakeDom(async ({ host }) => {
+    const reported = [];
+    const { panel } = build({
+      host,
+      preferences: { typewriter_ms: 800 },
+      onPreferences: (prefs) => reported.push(prefs),
+    });
+    panel.open({ name: "demo", fps: 30 });
+    await flush();
+
+    const byLabel = (label) => host.find((node) => node.getAttribute?.("aria-label") === label);
+    const typewriter = byLabel("文字显示速度");
+    assert.ok(typewriter, "菜单里有「文字显示速度」一项");
+    assert.equal(panel.value().typewriterMs, 800, "偏好里的速度被恢复");
+
+    typewriter.value = "200";
+    typewriter.dispatch("change");
+    assert.equal(panel.value().typewriterMs, 200, "value() 反映新的速度");
+    assert.equal(reported.at(-1).typewriter_ms, 200, "改动上报进偏好");
+
+    panel.close();
+  });
+});
 test("浮窗：作者改过名字之后，换入口脚本不再覆盖它", async () => {
   await withFakeDom(async ({ host }) => {
     const { panel } = build({

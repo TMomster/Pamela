@@ -15,6 +15,7 @@ import { addTint, clampChannel, parseHex, toHex, withLook } from "./filters.js";
 import { antialiasAmount } from "./antialias.js";
 import { normalizeLight } from "./light.js";
 import { PARAM_SPECS, boolArg } from "./pamela.js";
+import { richTextRuns, stripRichText } from "./rich-text.js";
 import { PAMELA_INTRO_MS } from "./pamela-intro.js";
 import {
   AUTOVOICE_DEFAULT_SPEED,
@@ -39,6 +40,9 @@ export const DEFAULT_RECORDING = Object.freeze({
   defaultMoveMs: 500,
 });
 
+/** 一句台词在「语音 / 文字都完毕」之后额外停顿的毫秒数（见需求：约 800ms）。 */
+export const SAY_TAIL_MS = 800;
+
 const TRANSFORM_POINTS = [
   "upleft", "upright", "downleft", "downright",
   "up", "down", "left", "right",
@@ -57,13 +61,17 @@ function rgbOf(color) {
   }
 }
 
-/** 一句台词的停留时长：显式 time 优先，否则按字数给玩家阅读时间。 */
+/**
+ * 一句台词的停留时长：显式 time 优先，否则按字数给玩家阅读时间。
+ *
+ * 字数只数看得见的字：`{红}…{/红}` 这类颜色标记不占阅读时间。
+ */
 export function holdFor(line, timing, config = DEFAULT_RECORDING) {
   const explicit = Number(timing?.time);
   if (Number.isFinite(explicit) && explicit > 0) {
     return explicit;
   }
-  const length = [...asText(line)].length;
+  const length = [...stripRichText(asText(line))].length;
   return Math.max(
     config.minLineMs,
     length * config.msPerCharacter + config.linePaddingMs,
@@ -82,6 +90,7 @@ export function createRecordingStage({
   config = DEFAULT_RECORDING,
   onVoice = null,
   onSynth = null,
+  onVoiceDuration = null,
 }) {
   const settings = { ...DEFAULT_RECORDING, ...config };
   // `stage.autoVoice(...)` 在导出里落在这里：开启后，没有显式配音的台词
@@ -96,19 +105,23 @@ export function createRecordingStage({
     /** @returns {Promise<void>|undefined} 被 push 进 context.pending 的等待。 */
     sayLine(name, line, timing = {}) {
       const t = clock.now();
-      const length = [...asText(line)].length;
-      if (timing.audio) {
-        // 显式配音优先：按变量名登记一次播放，由混音器排进成片。
-        onVoice?.(timing.audio);
-      } else if (autoVoiceOn) {
-        // 自动配音：没有显式配音时按字数登记一段合成效果音，并带上当前速度。
-        onSynth?.(length, autoVoiceSpeed);
-      }
-      const hold = holdFor(line, timing, settings);
-      const reveal = Math.min(settings.typewriterMs, Math.max(0, hold - 100));
+      const raw = asText(line);
+      // 台词只剩看得见的字进时间线；颜色标记另存成分段，由渲染后端逐段上色。
+      const text = stripRichText(raw);
+      const runs = richTextRuns(raw);
+      const length = [...text].length;
+      // 文本「全部显示完毕」所需的时长：与对话框里的逐字速度一致，
+      // 显式 time 直接用，否则按字数给阅读时间。
+      const textDone = holdFor(raw, timing, settings);
+      // 逐字揭示窗口：录制层把整句停留切出一段固定窗口做打字机，
+      // 它恒小于整句停留，因此只依赖 textDone，不受配音时长影响。
+      const reveal = Math.min(settings.typewriterMs, Math.max(0, textDone - 100));
       addSet(timeline, t, "dialogue", {
         name: asText(name),
-        text: asText(line),
+        text,
+        // 分段每句都写：上一句的颜色不能留在这一句上。全都没有颜色时渲染
+        // 后端仍走原来的整行路径，一个字的重排都不会变。
+        runs,
         revealed: 0,
         visible: true,
       });
@@ -116,6 +129,37 @@ export function createRecordingStage({
         addTween(timeline, t, t + reveal, "dialogue", "revealed", 0, length, {
           quantize: "floor",
         });
+      }
+      // 配音必须在 await 之前同步登记：保证配音严格从本句开头播放，与混音里的
+      // `at = clock.now()` 对齐；显式 audio 播放，否则看 autoVoice 是否开（合成效果音）。
+      let voiceDuration = 0;
+      if (timing.audio) {
+        onVoice?.(timing.audio);
+      } else if (autoVoiceOn) {
+        onSynth?.(length, autoVoiceSpeed);
+        // 合成效果音的跨度可按字数直接算（与 dialog.js 的 synthVoice 同公式）。
+        const count = Math.max(1, Math.ceil(length / 2));
+        voiceDuration = count * (1000 / autoVoiceSpeed);
+      }
+      // 一句的停顿点 = max(文字显示完毕, 语音播放完毕) + 800ms（见需求）。
+      // 没有配音时维持原 behaviour：停留就是 textDone 本身。
+      const audioHold = (vd) => Math.max(textDone, vd) + SAY_TAIL_MS;
+      const hold = voiceDuration > 0 ? audioHold(voiceDuration) : textDone;
+      // 显式配音的时长要解码文件才能知道，且导出在录制期就得算准停顿点：
+      // 异步解析，期间画面照常显示本句，解析完再排定本句的停留。缺文件 / 解不出
+      // 直接抛错，由上层中止导出并报错（与「配音缺失即中止」的需求一致）。
+      if (timing.audio && onVoiceDuration) {
+        return (async () => {
+          let vd = 0;
+          try {
+            vd = Number(await onVoiceDuration(timing.audio)) || 0;
+          } catch (error) {
+            throw error instanceof Error
+              ? error
+              : new Error(`配音时长解析失败：${timing.audio}`);
+          }
+          return clock.wait(vd > 0 ? audioHold(vd) : textDone);
+        })();
       }
       return clock.wait(hold);
     },
@@ -868,6 +912,9 @@ export function createRecordingObjects({
           // 舞台那边 `enable()` 会把它们整套应用一次，成片要和预览一致。
           commit({
             visible: true,
+            // 把当前透明度也写进时间线：若此前 `hide()` 已把它压到 0，这里以 0
+            // 上台，随后的 `show(ms)` 才是从 0 渐显到 1 的过渡（而非瞬现）。
+            opacity: state.opacity,
             // `state.path` rather than the constructor's: a `group()` written
             // before `enable()` has already moved the picture on to its first
             // frame, and enabling must not put the empty definition back.
@@ -923,7 +970,8 @@ export function createRecordingObjects({
       hide: null,
       alpha(value, ms) {
         commit({ opacity: Number(value) || 0 }, ms);
-        timed(ms);
+        // 与舞台一致：没给时长就是瞬间落定，不要像 move 那样垫一段默认时长。
+        settle(ms);
         return proxy;
       },
       move(dx, dy, dz, ms) {
@@ -1169,8 +1217,12 @@ export function createRecordingObjects({
         return proxy;
       },
     };
-    record.show = record.enable;
-    record.hide = record.disable;
+    // `show` / `hide` 是透明度过渡，与舞台同名方法一致：`show(ms)` 由当前透明度
+    // 渐显到 1，`hide(ms)` 渐隐到 0。不能直接别名成 enable / disable —— 那两个只切
+    // `visible`、从不碰透明度，会让 `ch.hide().enable().show(1500)` 在录制里直接落到
+    // 不透明、完全没有渐变（导出成片里立绘瞬现，自动播放与导出表现一致）。
+    record.show = (ms) => record.alpha(1, ms);
+    record.hide = (ms) => record.alpha(0, ms);
 
     const transform = {};
     for (const point of TRANSFORM_POINTS) {
@@ -1384,6 +1436,7 @@ export function createRecordGlobals(session, options = {}) {
     onSynth: audioRecorder
       ? (chars, speed) => audioRecorder.audio.autoVoice(chars, speed)
       : null,
+    onVoiceDuration: options.onVoiceDuration ?? session.voiceDuration ?? null,
   });
   const objects = createRecordingObjects({
     clock: session.clock,

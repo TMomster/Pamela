@@ -3,6 +3,7 @@
 // 未绑定配音或无法取得时长时返回 0。
 
 import { draw, hasPlate, plateLayers } from "./dialog-plate.js";
+import { richTextRuns, stripRichText } from "./rich-text.js";
 
 /** The stage's logical size. Kept in step with `stage.js`. */
 
@@ -523,6 +524,62 @@ export function createDialogue({
     }
   };
 
+  // 当前这一行的分段：`{红}…{/红}` 解析出来的「文字 + 颜色」。
+  let lineRuns = richTextRuns("");
+  // 文本框里现在是分段画出来的（有颜色）还是纯文本。切回纯文本时要把分段
+  // 先拆掉，否则真 DOM 里 `textContent` 会与残留的 span 抢位置。
+  let runsPainted = false;
+
+  /** 只取前 `limit` 个可见字，逐字显示用；标记本身不算字。 */
+  const clipRuns = (runs, limit) => {
+    const clipped = [];
+    let left = limit;
+    for (const run of runs) {
+      if (left <= 0) {
+        break;
+      }
+      const chars = [...run.text];
+      const piece = chars.length > left ? chars.slice(0, left).join("") : run.text;
+      left -= chars.length;
+      if (piece) {
+        clipped.push({ text: piece, color: run.color });
+      }
+    }
+    return clipped;
+  };
+
+  /**
+   * 把一行写到文本框里，最多写到第 `limit` 个可见字。
+   *
+   * 没有颜色标记时写纯文本，排版与旧版一字不差；有色时整行包进一个 span 再
+   * 分段上色——多出这一层是必须的：`.dialogue__text` 是 flex 列，散开的 span
+   * 会各自成行。
+   */
+  const paintLine = (runs, limit = Infinity) => {
+    const total = runs.reduce((sum, run) => sum + [...run.text].length, 0);
+    const shown = clipRuns(runs, Math.min(total, Math.max(0, limit)));
+    if (!runs.some((run) => run.color)) {
+      if (runsPainted) {
+        text.replaceChildren();
+        runsPainted = false;
+      }
+      text.textContent = shown.map((run) => run.text).join("");
+      return;
+    }
+    const line = document.createElement("span");
+    line.className = "dialogue__line";
+    for (const run of shown) {
+      const piece = document.createElement("span");
+      piece.textContent = run.text;
+      if (run.color) {
+        piece.style.color = run.color;
+      }
+      line.append(piece);
+    }
+    text.replaceChildren(line);
+    runsPainted = true;
+  };
+
   /**
    * Draws a line into the box, all at once.
    *
@@ -549,7 +606,8 @@ export function createDialogue({
     // over, which costs nothing.
     speaker.hidden = name === null || name === undefined;
     speaker.textContent = speaker.hidden ? "" : name;
-    text.textContent = line;
+    lineRuns = richTextRuns(line == null ? "" : line);
+    paintLine(lineRuns);
     fitText();
   };
 
@@ -569,10 +627,10 @@ export function createDialogue({
     if (!typing) {
       return false;
     }
-    const { timer, full, done } = typing;
+    const { timer, runs, done } = typing;
     typing = null;
     clearTimeout(timer);
-    text.textContent = full;
+    paintLine(runs);
     fitText();
     done?.();
     return true;
@@ -590,34 +648,34 @@ export function createDialogue({
    * before this field existed answers — shows the line at once, exactly as it
    * always did.
    */
-  const reveal = (line, speedOverride) => {
+  const reveal = (runs, speedOverride) => {
     // 样式文件里的 `text.typeSpeed` 优先；为 0（未设）时回落到项目默认档位。
     // `speedOverride` 用于 say 的 time 参数：强制在指定时间内显示完。
     const speed =
       speedOverride != null
         ? speedOverride
         : Number(current().text.typeSpeed) || projectSpeed;
+    const total = runs.reduce((sum, run) => sum + [...run.text].length, 0);
     if (speed <= 0 || typeof setTimeout !== "function") {
-      text.textContent = line;
+      paintLine(runs);
       fitText();
       return Promise.resolve();
     }
 
-    const characters = [...line];
-    text.textContent = line;
+    paintLine(runs);
     fitText();
     // The box is measured on the finished line; the reveal then starts from an
     // empty one at the same font size.
     const size = text.style.fontSize;
-    text.textContent = "";
+    paintLine(runs, 0);
     text.style.fontSize = size;
 
     return new Promise((resolve) => {
       let shown = 0;
       const step = () => {
         shown += 1;
-        text.textContent = characters.slice(0, shown).join("");
-        if (shown >= characters.length) {
+        paintLine(runs, shown);
+        if (shown >= total) {
           typing = null;
           resolve();
           return;
@@ -625,7 +683,7 @@ export function createDialogue({
         typing.timer = setTimeout(step, speed);
       };
       typing = {
-        full: line,
+        runs,
         done: () => resolve(),
         timer: setTimeout(step, speed),
       };
@@ -707,27 +765,30 @@ export function createDialogue({
   const computeDelay = async () => {
     const chars = [...pendingLine].length;
     const speed = effectiveSpeed();
-    const revealTime =
+    // 本句文本从「开始显示」到「全部显示完毕」所经历的时长（毫秒）。
+    // `onLineReady` 在文本显示完毕后才被触发，因此这部分时间此刻已经过去。
+    const textDone =
       currentOpts.time > 0
-        ? chars > 0
-          ? currentOpts.time / chars
-          : 0
+        ? currentOpts.time
         : speed > 0
           ? speed * chars
           : 0;
+    // 文本显示完毕后的统一停顿基准：800ms，确保用户有时间看完/听完本句。
+    const READ_PAUSE = 800;
     if (voiceDuration > 0) {
-      if (currentOpts.time > 0) {
-        // 文本须在 time 内显示完；切换语句在配音播放完毕后 +0.5s。
-        return Math.max(0, Math.max(currentOpts.time, voiceDuration) + 500 - revealTime);
-      }
-      // 仅绑定配音（显式或自动）：以配音结束时间为准，打字速度不受影响。
-      return Math.max(0, voiceDuration - revealTime);
+      // 存在配音（显式 audio 或自动配音效果音）：以「文本全部显示完毕」与
+      // 「语音播放完毕」两者中最晚完成的时刻为切换基准，再额外停顿 800ms。
+      // 这样无论语音先结束（如开启 autoVoice、音效短于逐字显示）还是文本先
+      // 结束，用户都有 800ms 余量听完并看完，不会在文字刚显示完就切到下一句。
+      const waitForVoice = Math.max(0, voiceDuration - textDone);
+      return waitForVoice + READ_PAUSE;
     }
     if (currentOpts.time > 0) {
-      // 仅指定 `time` 时，文本必须在该时长内显示完毕并随即切换语句，显示过程已计入 `time`。
-      return 0;
+      // 仅指定 `time` 时，文本必须在该时长内显示完毕并随即切换语句，
+      // 但至少停顿 800ms 让用户读完。
+      return READ_PAUSE;
     }
-    // 默认：打字机模式 = 显示完 +0.5s；非逐字 = 每 3 字一组、每组 0.8s。
+    // 默认（无配音）：打字机模式 = 显示完 +0.5s；非逐字 = 每 3 字一组、每组 0.8s。
     if (speed > 0) {
       return speed * chars + 500;
     }
@@ -881,7 +942,8 @@ export function createDialogue({
     // that would release it is one no click occurs.
     if (isPreviewing()) {
       render(name, value);
-      onLine?.(name ?? null, value);
+      // 对白以外的地方（回放记录、导出）拿到的都是去掉颜色标记的文字。
+      onLine?.(name ?? null, stripRichText(value == null ? "" : value));
       return Promise.resolve();
     }
     if (waiting) {
@@ -889,12 +951,14 @@ export function createDialogue({
     }
     // 进入新一句：先中断上一句可能仍在播放的配音（保险，正常已在落终态时停过）。
     stopActiveVoice();
-    pendingLine = value == null ? "" : String(value);
+    // `pendingLine` 是去掉颜色标记的可见文字：逐字节奏、按字数计时的配音与
+    // 回放记录都按它算，标记不占时间也不进记录。
+    pendingLine = stripRichText(value == null ? "" : value);
     currentOpts = normalizeOpts(opts);
     render(name, value);
     // Remembered for the backlog, which shows the lines already performed.
-    pushHistory(name, value);
-    onLine?.(name ?? null, value);
+    pushHistory(name, pendingLine);
+    onLine?.(name ?? null, pendingLine);
     // 配音（显式 audio 或自动配音效果音）与文字同时开始：在说台词的一开始就启动，
     // 而不是等逐字显示完才放——手动 / 自动模式都如此，和导出成片一致。
     voiceStarted = startVoice();
@@ -911,7 +975,7 @@ export function createDialogue({
     // Once the line is fully on screen, auto or skip may advance it; until then
     // the player settles it by hand. In skip mode the reveal is cut short so the
     // line reads at once rather than typing out.
-    reveal(value, revealSpeed)
+    reveal(lineRuns, revealSpeed)
       .then(() => onLineReady())
       .catch(() => {});
     if (skip) {
@@ -981,6 +1045,7 @@ export function createDialogue({
     speaker.hidden = true;
     speaker.textContent = "";
     text.textContent = "";
+    runsPainted = false;
     text.style.fontSize = fontSize(current().text.font);
     stamp.hidden = true;
     stamp.removeAttribute("src");

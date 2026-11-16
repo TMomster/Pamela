@@ -15,6 +15,7 @@ import {
   flushMicrotasks,
   seededRandom,
 } from "./export-clock.js";
+import { createAudioRecorder, createVoiceDurationResolver } from "./export-audio.js";
 import { createExportPerformance } from "./export-performance.js";
 import { createStateCursor, createTimeline, timelineDuration } from "./export-timeline.js";
 
@@ -203,6 +204,11 @@ export function createAdvancingClock({
  * @param {(labels: string[]) => Promise<number>} [options.chooseStrategy]
  *   选择支怎么走；与真导出用同一个策略，估出来的时长才对得上
  * @param {(session: object) => Promise<unknown>} [options.performance] 测试注入
+ * @param {(path: string) => Promise<ArrayBuffer>} [options.loadAudio] 读音频字节；
+ *   给了它，估算才会把每句「配音真实长度 + 800ms」算进总时长，与真导出对齐
+ * @param {Function} [options.audioContextClass] 注入解码上下文类（测试用）
+ * @param {Map<string, Promise<number>>} [options.voiceDurationCache] 外部共享的解码缓存；
+ *   与真导出共用时，估算阶段解过的配音在导出阶段直接命中，成片帧数≈估算帧数
  * @returns {Promise<{ ms: number, frames: number, timelineMs: number, clockMs: number,
  *   complete: boolean, error: string|null }>}
  */
@@ -217,9 +223,28 @@ export async function estimateDuration({
   isStopped = null,
   chooseStrategy = null,
   performance = null,
+  loadAudio = null,
+  audioContextClass = null,
+  voiceDurationCache = null,
 } = {}) {
   const clock = createAdvancingClock({ fps, timescale });
   const timeline = createTimeline();
+  // 有了读音频的通道，就按真导出的同一套口径估算：每句停顿 = max(文字完毕, 语音完毕)
+  // + 800ms。没有通道（纯文本 / 测试）则退回只按文字停留，和以前一致。
+  const audioRecorder = loadAudio ? createAudioRecorder({ clock }) : null;
+  const voiceDuration = audioRecorder
+    ? createVoiceDurationResolver({
+        audioRecorder,
+        loadAudio,
+        AudioContextClass: audioContextClass,
+        cache: voiceDurationCache,
+      })
+    : null;
+  // 估算对缺文件宽容：解不出就当没有这段配音（退回文字停留），免得整个时长估算失败；
+  // 真导出仍走严格路径（缺配音即报错中止）。
+  const voiceDurationTolerant = voiceDuration
+    ? (name) => voiceDuration(name).catch(() => 0)
+    : null;
   const session = {
     config: { fps, timescale },
     clock,
@@ -227,6 +252,8 @@ export async function estimateDuration({
     cursor: createStateCursor(timeline),
     assets: new Map(),
     renderer: null,
+    audioRecorder,
+    voiceDuration: voiceDurationTolerant,
   };
 
   const drive = performance ?? createExportPerformance({ source, path, read, chooseStrategy });

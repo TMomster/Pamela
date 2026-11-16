@@ -49,6 +49,16 @@ function asMs(value) {
 }
 
 /**
+ * 判定 `say` 的尾部字符串是「直接文件名 / 路径」还是「Audio 变量名」。
+ *
+ * 与 `audio.js` 的判定保持一致：含分隔符或带扩展名的按文件处理；纯单词视为
+ * 变量名（查不到时静默跳过，不去误把拼写错误当缺文件）。
+ */
+const AUDIO_PATH_RE = /[\\/]|[.][A-Za-z0-9]{1,8}$/;
+const looksLikePath = (name) =>
+  typeof name === "string" && AUDIO_PATH_RE.test(name);
+
+/**
  * 舞台 `Audio` 的录制版本：与 `audio.js` 的属性同名、同顺序，但不碰 DOM。
  *
  * `args` 与真的一样是 `(文件名, 音量 = 1, 循环 = false)`；`context.assignee` 是
@@ -152,10 +162,21 @@ export function createAudioRecorder({ clock, onError = () => {} } = {}) {
   /**
    * `say(text, time, audio)` 的配音：声音对象先登记，真正播放由事件驱动。
    *
+   * `name` 解析分两种：脚本里建过 `Audio` 的变量名（优先）；查不到且字符串形如
+   * 文件时，按路径合成一条配音声段（让 `say("…", "Audio/vo.wav")` 不用先建变量
+   * 也能进成片）。纯单词既不是变量也不像路径时静默跳过，不去误报缺文件。
+   *
    * 真舞台返回音轨长度作为这一句的时长；导出返回 0（见 `duration()` 的理由）。
    */
   factory.voice = (name) => {
-    const id = names.get(String(name ?? ""));
+    const key = String(name ?? "");
+    let id = names.get(key);
+    if (!id && looksLikePath(key)) {
+      // 直接按文件名引用：补一条按路径加载的配音声段，让混音阶段排进成片。
+      id = `path-${(counter += 1)}`;
+      sounds.set(id, { id, path: key, volume: 1, loop: false });
+      names.set(key, id);
+    }
     if (id) {
       events.push({ kind: "play", id, at: clock.now(), fadeMs: 0 });
     }
@@ -192,6 +213,27 @@ export function createAudioRecorder({ clock, onError = () => {} } = {}) {
     /** 报告中转：录制阶段不报错，混音阶段再统一处理缺文件。 */
     fail(error) {
       onError(error instanceof Error ? error.message : String(error));
+    },
+    /**
+     * 把 `say(text, time, 配音)` 里的名字解析成音频文件路径。
+     *
+     * 与 `voice(name)` 同一套判定：脚本里建过的 `Audio` 变量名优先；查不到但
+     * 字符串形如文件路径时按路径补一条并退回该路径；两者都不是时返回 null。
+     * 导出录制期要靠它提前算出配音时长，从而把一句的停顿点卡在语音播放完。
+     *
+     * @param {string} name
+     * @returns {string|null}
+     */
+    pathForName(name) {
+      const key = String(name ?? "");
+      let id = names.get(key);
+      if (!id && looksLikePath(key)) {
+        id = `path-${(counter += 1)}`;
+        sounds.set(id, { id, path: key, volume: 1, loop: false });
+        names.set(key, id);
+      }
+      const sound = id ? sounds.get(id) : null;
+      return sound ? sound.path : null;
     },
   };
 }
@@ -341,6 +383,85 @@ export function planAudio({ events = [], sounds = new Map() } = {}) {
 
   voices.sort((left, right) => left.startMs - right.startMs);
   return { voices };
+}
+
+/**
+ * 导出录制期用的「配音时长解析器」：给定 `say` 的配音名，返回其播放时长（毫秒）。
+ *
+ * 与实时演出一致（`dialog.js` 的 `resolveVoice`）：把一句的停顿点卡在「语音播放完
+ * 毕」与「文字显示完毕」两者中较晚的那一刻。导出在录制脚本时就得算准这个值，所以
+ * 这里把音频文件离屏解码一遍，取 `duration`。缺文件 / 解不出 / 没有读取通道都会抛错，
+ * 由上层中止导出并提示（与「配音缺失即报错中止」的需求一致）。
+ *
+ * 解码结果按路径缓存，同一段配音只解一次。失败会清掉缓存项（下一次可重试）。
+ * 调用方可传入一个外部 `cache` Map：估算与真导出共用同一个，估算阶段解码过的配音
+ * 在导出阶段直接命中、不再卡帧循环等解码，成片帧数才不会比估算多出一截。
+ *
+ * @param {object} options
+ * @param {object} options.audioRecorder `createAudioRecorder` 的返回值（取名字→路径）
+ * @param {(path: string) => Promise<ArrayBuffer>} [options.loadAudio] 读音频字节
+ * @param {Function} [options.AudioContextClass] 注入用；缺省取 `OfflineAudioContext`
+ *   / `AudioContext`，都不存在则报错。
+ * @param {Map<string, Promise<number>>} [options.cache] 外部共享的解码缓存
+ * @returns {(name: string) => Promise<number>}
+ */
+export function createVoiceDurationResolver({
+  audioRecorder,
+  loadAudio,
+  AudioContextClass = null,
+  cache = null,
+} = {}) {
+  const durations = cache ?? new Map();
+  let context = null;
+  const getContext = () => {
+    if (context) {
+      return context;
+    }
+    const Ctx =
+      AudioContextClass ?? globalThis.OfflineAudioContext ?? globalThis.AudioContext;
+    if (typeof Ctx !== "function") {
+      throw new Error("当前环境不支持音频解码（缺少 AudioContext / OfflineAudioContext）");
+    }
+    // 解码不需要真正播放：OfflineAudioContext 不受自动播放策略限制，最稳。
+    context = new Ctx(1, 1, 44100);
+    return context;
+  };
+  const decodeMs = async (path) => {
+    if (!durations.has(path)) {
+      const task = (async () => {
+        if (typeof loadAudio !== "function") {
+          throw new Error(`没有接入音频读取通道，无法解析配音时长：${path}`);
+        }
+        const bytes = await loadAudio(path);
+        if (!bytes || (bytes.byteLength ?? 0) === 0) {
+          throw new Error(`配音文件读不到或为空：${path}`);
+        }
+        const buffer = await getContext().decodeAudioData(bytes.slice(0));
+        const ms = Math.max(0, (buffer.duration || 0) * 1000);
+        if (ms <= 0) {
+          throw new Error(`配音文件没有可解码的音频：${path}`);
+        }
+        return ms;
+      })();
+      durations.set(path, task);
+      // 失败不留在缓存里：下一次可重试，也不会把一次偶发失败带到真导出。
+      task.catch(() => durations.delete(path));
+    }
+    return durations.get(path);
+  };
+  return (name) => {
+    const path = audioRecorder?.pathForName ? audioRecorder.pathForName(name) : null;
+    if (!path) {
+      // 同步抛会变成立即异常，调用处（sayLine）是 await 一个 Promise，所以这里
+      // 返回被拒的 Promise，让缺配音像解码失败一样走「中止导出」的同一路径。
+      return Promise.reject(
+        new Error(
+          `配音「${name}」没有对应的音频文件（既不是已声明的 Audio 变量，也不是有效路径）`,
+        ),
+      );
+    }
+    return decodeMs(path);
+  };
 }
 
 /**
@@ -640,7 +761,10 @@ export async function buildAudioTrack({
   durationMs,
   loadAudio = null,
   loadVideo = null,
-  loadClip = null,
+  // 默认取引擎自带的单位音效：自动配音不是项目资源，缺省就该能取到。写成
+  // null 会把 `renderAudio` 自己的默认值覆盖掉，导出时合成声段永远读不到
+  // 音效，整条自动配音以「自动配音音效缺失」被跳过。
+  loadClip = loadAutoVoiceClip,
   sampleRate = AUDIO_SAMPLE_RATE,
   channels = AUDIO_CHANNELS,
   bitrate = AUDIO_BITRATE,
@@ -674,8 +798,15 @@ export async function buildAudioTrack({
       AudioContextClass,
       onMissing: (voice, error) => {
         failed += 1;
-        const kind = voice.kind === "Video" ? "视频" : "音频";
-        reasons.add(`${kind} ${voice.path}：${error.message}`);
+        // 合成声段（自动配音）没有文件路径：直接报「自动配音」，别把
+        // `undefined` 拼进提示里。
+        const label =
+          voice.kind === "Video"
+            ? `视频 ${voice.path}`
+            : voice.kind === "Synth"
+              ? "自动配音"
+              : `音频 ${voice.path}`;
+        reasons.add(`${label}：${error.message}`);
       },
     });
     const detail = [...reasons].join("；");

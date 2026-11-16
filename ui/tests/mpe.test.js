@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { isMpePath, shorthandCallIn, transpile } from "../mpe.js";
-import { run } from "../pamela.js";
+import { BUILTIN_ALIASES, STAGE_CALLS, run } from "../pamela.js";
 
 /** Compiles one line and answers the result. */
 function line(source) {
@@ -68,6 +68,102 @@ test("mpe：舞台的批量调用，冒号跳过中间的参数", () => {
   assert.equal(line("舞台 说 你好：世界"), '舞台.说("你好：世界")');
   assert.equal(line("ch say : 他说"), 'ch.say(": 他说")');
   assert.equal(line("ch say 你好"), 'ch.say("你好")');
+});
+
+test("mpe：舞台自己的调用，写着 stage 也算方法", () => {
+  // 这些名字只有舞台有（不是任何对象的方法），但 `.pe` 里 `stage.pamela()` 合法，
+  // 简写就必须读得懂同一个第二词。
+  assert.equal(line("stage pamela"), "stage.pamela()");
+  assert.equal(line("舞台 开场"), "舞台.开场()");
+  assert.equal(line("stage perspective true"), "stage.perspective(true)");
+  assert.equal(line("stage guideline true 100"), "stage.guideline(true, 100)");
+  assert.equal(line("stage ambient 0.5"), "stage.ambient(0.5)");
+  assert.equal(line("stage autoVoice 2"), "stage.autoVoice(2)");
+  assert.equal(line("stage click 3000"), "stage.click(3000)");
+  assert.equal(line("stage str {分数}"), "stage.str(分数)");
+  // 类型与内置函数同样能挂在舞台后面：`stage.Array(…)` 是 `Array(…)`。
+  assert.equal(line("stage Array ch bg"), "stage.Array(ch, bg)");
+  // 级联照常从那个方法接下去。
+  assert.equal(line("stage pamela . 说 你好"), 'stage.pamela().说("你好")');
+});
+
+test("mpe：省掉接收者的舞台调用，包括不带参数的开场", () => {
+  // `pamela()` 与 `开场()` 在 `.pe` 里都是裸调用，简写里也该是。
+  assert.equal(line("pamela"), "pamela()");
+  assert.equal(line("开场"), "开场()");
+  assert.equal(line("环境亮度 0.5"), "环境亮度(0.5)");
+  assert.equal(line("ambient 0.5"), "ambient(0.5)");
+  // 放进 cue 也是同一条调用。
+  assert.equal(line("cue 3000 pamela"), "cue(3000) pamela()");
+  assert.equal(line("cue pamela"), "cue pamela()");
+});
+
+test("mpe：排除 / 不排除 的两个列表都是对象", () => {
+  // 冒号两边都是对象，所以词按名字读，不按台词读。
+  assert.equal(line("stage exclude 灯1 : 小帕"), "stage.exclude(灯1 : 小帕)");
+  assert.equal(line("stage unexclude 灯1 灯2 : 小帕 小白"), "stage.unexclude(灯1, 灯2 : 小帕, 小白)");
+  assert.equal(line("排除 灯1 : 小帕"), "排除(灯1 : 小帕)");
+  assert.equal(line("舞台 不排除 灯1 : 小帕"), "舞台.不排除(灯1 : 小帕)");
+  // 对象表里逗号与空格同义，冒号前后都是。
+  assert.equal(line("排除 灯1, 灯2 : 小帕, 小白"), "排除(灯1, 灯2 : 小帕, 小白)");
+  assert.equal(line("enable ch, bg"), "enable(ch, bg)");
+  // 台词里的逗号仍是台词。
+  assert.equal(line("ch say 你好，世界"), 'ch.say("你好，世界")');
+});
+
+test("mpe：舞台与对话框是名字，不是一次调用", () => {
+  // 整行只有一个名字时，那一行读的是对象本身（`x = 舞台` 也一样）；
+  // 编译成调用会变成另一个程序。
+  assert.equal(line("舞台"), "舞台");
+  assert.equal(line("对话框"), "对话框");
+  assert.equal(line("x = 舞台"), "x = 舞台");
+  assert.equal(line("x = 对话框"), "x = 对话框");
+  assert.equal(shorthandCallIn("舞台"), null);
+  assert.equal(shorthandCallIn("x = 舞台"), null);
+});
+
+test("mpe：舞台的每个调用都读得懂，写不写 stage 都一样", () => {
+  // 这张表就是 `.pe` 里能省掉接收者的全部名字：漏掉一个，那一行就会被读成
+  // 台词或接收者。中文写法一并核对，两种拼写走同一条路。
+  const names = new Set(STAGE_CALLS);
+  for (const [chinese, english] of BUILTIN_ALIASES) {
+    if (STAGE_CALLS.has(english)) {
+      names.add(chinese);
+    }
+  }
+  for (const name of names) {
+    assert.equal(transpile(name), `${name}()`, name);
+    assert.equal(transpile(`stage ${name}`), `stage.${name}()`, name);
+  }
+});
+
+test("mpe：舞台自己的调用编译出来可执行", async () => {
+  const calls = [];
+  const stage = {
+    kind: "Stage",
+    pamela() {
+      calls.push(["pamela"]);
+      return stage;
+    },
+    perspective(value) {
+      calls.push(["perspective", value]);
+      return stage;
+    },
+    exclude(lights, targets) {
+      calls.push(["exclude", lights.map((light) => light.name), targets.map((one) => one.name)]);
+      return stage;
+    },
+  };
+  const light = { kind: "Light", name: "灯1" };
+  const hero = { kind: "Character", name: "小帕" };
+
+  const source = ["stage pamela", "stage perspective true", "stage exclude 灯1 : 小帕"].join("\n");
+  const result = await run(transpile(source), {
+    globals: { stage, 灯1: light, 小帕: hero },
+  });
+
+  assert.equal(result.error, undefined);
+  assert.deepEqual(calls, [["pamela"], ["perspective", true], ["exclude", ["灯1"], ["小帕"]]]);
 });
 
 test("mpe：参数可以按名字给，位置随之自由", () => {

@@ -104,3 +104,49 @@ test("脚本有错时仍然回答跑到哪一步，并带上错误", async () =>
   assert.equal(result.complete, false);
   assert.ok(result.ms >= 0);
 });
+
+test("estimateDuration 把配音真实长度 + 800ms 算进总时长（与真导出对齐）", async () => {
+  const script = 'say("你好世界", 0, "Audio/vo.wav")';
+  // 没有读音频通道：只按文字停留（4 字 → max(900, 4×55+600)=900ms），进度条分母会偏小。
+  const plain = await estimateDuration({
+    source: script,
+    path: "scripts/main.pe",
+    read: async () => "",
+  });
+  assert.equal(plain.clockMs, 900, "无通道时退回文字停留");
+
+  // 给了通道：配音 3s，停顿点 = max(900, 3000) + 800 = 3800ms。
+  class FakeCtx {
+    decodeAudioData() {
+      return Promise.resolve({ duration: 3 });
+    }
+  }
+  const withVoice = await estimateDuration({
+    source: script,
+    path: "scripts/main.pe",
+    read: async () => "",
+    loadAudio: async () => new ArrayBuffer(8),
+    audioContextClass: FakeCtx,
+  });
+  assert.equal(withVoice.clockMs, 3800, "配音长度 + 800 进入总时长");
+  assert.equal(withVoice.frames, framesFor(3800, 30));
+});
+
+test("estimateDuration 配音文件读不到时容忍：退回文字停留而非整段失败", async () => {
+  const script = 'say("你好世界", 0, "Audio/vo.wav")';
+  class FakeCtx {
+    decodeAudioData() {
+      return Promise.resolve({ duration: 3 });
+    }
+  }
+  const result = await estimateDuration({
+    source: script,
+    path: "scripts/main.pe",
+    read: async () => "",
+    // 空字节 → 解不出；估算应宽容，不当成整段失败（真导出才会严格报错）。
+    loadAudio: async () => new ArrayBuffer(0),
+    audioContextClass: FakeCtx,
+  });
+  assert.equal(result.error, null, "估算不因缺配音失败");
+  assert.equal(result.clockMs, 900, "缺配音退回文字停留");
+});

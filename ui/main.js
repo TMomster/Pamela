@@ -40,6 +40,7 @@ import { createKeyframeOps } from "./keyframe-ops.js";
 import { canPaste, createTreeOps, targetDirectory } from "./tree-ops.js";
 import { createStageSettings } from "./stage-settings.js";
 import { createStageExitConfirm } from "./stage-exit.js";
+import { createStageKeys } from "./stage-keys.js";
 import { createStageMenu } from "./stage-menu.js";
 import { nodeKey, run, stageNameFor, tokenize } from "./pamela.js";
 import { createExportSession } from "./export-session.js";
@@ -4126,6 +4127,8 @@ async function exportMp4() {
   let exporting = null;
   /** 准备阶段（读脚本、预解码）没有会话可叫停，先把意图记下来。 */
   let cancelRequested = false;
+  /** 估算与真导出共用的配音时长缓存：估算阶段解过的配音，导出阶段直接命中。 */
+  const voiceDurationCache = new Map();
 
   const panel = createExportPanel({
     entries: scripts,
@@ -4153,6 +4156,10 @@ async function exportMp4() {
         timescale: draft.timescale,
         chooseStrategy: choiceStrategyFor(draft.choiceMode),
         isStopped: () => !panel.isOpen(),
+        // 把配音真实长度算进总时长，进度条分母才和真导出一致。
+        loadAudio: async (path) => arrayBufferFromDataUrl(await actions.readAudio(path)),
+        // 与真导出共用缓存：这里解过的配音，导出时直接命中、不卡帧循环。
+        voiceDurationCache,
       });
     },
     onStart: (config) => runExport(config),
@@ -4208,6 +4215,9 @@ async function exportMp4() {
         read: (asked) => actions.read(asked),
         preload,
         chooseStrategy: choiceStrategyFor(config.choiceMode),
+        // 把面板参数（含文字显示速度 typewriterMs）交给录制层，否则立绘/对白的
+        // 逐字速度会用录制层内置默认值，与菜单选择脱节。
+        config,
       });
       panel.setPhase("正在渲染…");
       exporting = createExportSession({
@@ -4225,6 +4235,8 @@ async function exportMp4() {
         // <video> 走 media-src 所以有声，导出若走 fetch 就会静音且没有任何报错。
         audio: true,
         loadAudio: async (path) => arrayBufferFromDataUrl(await actions.readAudio(path)),
+        // 复用估算阶段的解码缓存：配音时长直接命中，导出帧数≈估算帧数。
+        voiceDurationCache,
         // 视频素材的声轨：与舞台一样受 mute / volume / play / pause 控制。
         loadVideo: async (path) => arrayBufferFromDataUrl(await actions.readVideo(path)),
         // 视频画面：逐帧 seek 到播放头位置再画进离屏画布。
@@ -4764,6 +4776,28 @@ function wireStageControls() {
       playback.applyStageFullscreen(on);
       playback.refreshMenu();
     });
+  });
+
+  // 舞台在屏上时，整场演出可以用键盘走完：空格 / ↓ 推进（同鼠标左键）、↑ 回看、
+  // A 自动、F 全屏、S 存档、D 读档、O 设置、按住 Ctrl 快进。键挂在 `document`
+  // 上：画面本身不可聚焦，焦点常常留在被收起的编辑区里。
+  createStageKeys({
+    getStage: () => stage,
+    // 退出确认卡开着时，键归那张卡（它自己拦 Esc / Enter / 空格）。
+    isActive: () => stageOnScreen() && !stageExit?.isOpen(),
+    // 存档格、回看与设置面板盖着画面时不推台词：玩家正在看那块面板，不在读台词。
+    canAdvance: () =>
+      stageOnScreen() &&
+      !stageExit?.isOpen() &&
+      !slotsOpen() &&
+      !playback.isBacklogOpen() &&
+      !settingsPanel?.isOpen(),
+    toggleAuto: () => playback.toggleAuto(),
+    toggleFullscreen: () => playback.toggleFullscreen(),
+    openSave: () => openSlots("save"),
+    openLoad: () => openSlots("load"),
+    openSettings: () => playback.openSettings(),
+    toggleBacklog: () => playback.toggleBacklog(),
   });
 }
 

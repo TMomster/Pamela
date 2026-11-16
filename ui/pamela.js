@@ -1,6 +1,9 @@
 // 剧本语言：词法分析、语法分析与解释器。
 // Pamela — the script language: tokeniser, parser and interpreter.
 // 标识符支持任意 Unicode 字母；数值保留完整精度，不隐式舍入。
+
+import { isColorMark } from "./rich-text.js";
+
 /**
  * Characters that form a single token on their own.
  *
@@ -574,6 +577,15 @@ export function tokenize(source) {
         // evaluates it), and the literal run resumes after the closing brace.
         if (current === "{") {
           const braceAt = index;
+          // `{红}` / `{#000000}` / `{/红}` 是台词的颜色标记，不是插值：整段原样
+          // 留在字面量里，由对话框按段上色（见 `rich-text.js`）。认不出来的
+          // `{…}` 仍按插值处理，旧脚本一个字都不用改。
+          const closing = text.indexOf("}", braceAt + 1);
+          if (closing > braceAt && isColorMark(text.slice(braceAt + 1, closing))) {
+            value += text.slice(braceAt, closing + 1);
+            index = closing + 1;
+            continue;
+          }
           hadInterp = true;
           flush();
           // One for the brace that opened this interpolation; a matching `}` brings
@@ -2280,6 +2292,36 @@ export const VARIADIC_CALLS = Object.freeze({
   exclude: "光源",
   unexclude: "光源",
 });
+
+/**
+ * Every name the stage itself answers to.
+ *
+ * A bare call has no receiver to resolve against at read time, so `.pe` hands
+ * every unknown name to the stage and lets it answer (see `callStage`): a type,
+ * the narrator, the clock, a batch call and the opening animation are all one
+ * and the same thing with the receiver left out. The `.mpe` dialect is compiled
+ * line by line instead and has no such fallback, so this table is what it reads
+ * a word against — a name missing here is read as prose or as a receiver, and
+ * the line either fails or means something else.
+ *
+ * `stage` and `dialog` are left out on purpose: they are *values* a script may
+ * name (`x = 舞台` reads the stage), not calls waiting for arguments.
+ */
+export const STAGE_CALLS = new Set([
+  // The types the stage builds, the narrator, the clock and the language's own
+  // functions, all reachable through it.
+  ...[...BUILTIN_GLOBALS].filter((name) => name !== "stage" && name !== "dialog"),
+  // The calls it makes for several objects at once, and the two that take a
+  // list on each side of their colon.
+  ...Object.keys(BULK_METHODS),
+  ...Object.keys(VARIADIC_CALLS),
+  // Actions only the stage has: brightness, the two space rulers and the
+  // opening animation. They are methods of no object.
+  "ambient",
+  "perspective",
+  "guideline",
+  "pamela",
+]);
 
 /**
  * Whether `value` is one of the engine's objects rather than a plain value.

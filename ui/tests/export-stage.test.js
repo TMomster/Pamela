@@ -381,6 +381,25 @@ test("filter and tint transitions interpolate on the timeline", () => {
   assert.equal(done.tint_r, 20);
 });
 
+test("角色 hide().enable().show(ms) 在录制里渐显而非瞬现", () => {
+  // 复现自动播放 / 导出时立绘直接显示、没有渐变的问题：录制路径曾把 show/hide
+  // 别名成 enable/disable，而后者只切 visible、不碰透明度，于是 hide→enable→show
+  // 在成片里落到全不透明的固定值，完全没有 0→1 的过渡。
+  const { timeline, globals } = harness();
+  const ch = globals({ pending: [], assignee: "ch" }).stage.Character("ch.png");
+  ch.hide().enable().show(1500);
+
+  const target = "character:ch";
+  const start = stateAt(timeline, 0)[target];
+  assert.equal(start.visible, true, "enable 后可见");
+  assert.equal(start.opacity, 0, "上台时透明度为 0（hide 已压到 0）");
+
+  const mid = stateAt(timeline, 750)[target];
+  assert.ok(mid.opacity > 0 && mid.opacity < 1, "中途处于半透明渐变中");
+
+  assert.equal(stateAt(timeline, 1500)[target].opacity, 1, "到时完全显示");
+});
+
 test("Audio objects go to the recorder instead of the timeline", () => {
   const clock = createVirtualClock();
   const timeline = createTimeline();
@@ -433,6 +452,125 @@ test("sayLine writes a line, a typewriter tween and a timed hold", async () => {
   clock.tickMs(1200);
   await waiting;
   assert.equal(clock.pending(), 0);
+});
+
+test("sayLine 把颜色标记从台词里去掉，分段另存给成片上色", () => {
+  const clock = createVirtualClock();
+  const timeline = createTimeline();
+  const recording = createRecordingStage({ clock, timeline });
+  recording.sayLine("旁白", "这里的{red}重要文本{/red}", {});
+
+  const first = stateAt(timeline, 0);
+  assert.equal(first.dialogue.text, "这里的重要文本", "标记不进文本");
+  assert.deepEqual(first.dialogue.runs, [
+    { text: "这里的", color: null },
+    { text: "重要文本", color: "red" },
+  ]);
+  // 字数只数看得见的字：逐字揭示的终点是 7（标记不算）。
+  assert.equal(
+    stateAt(timeline, DEFAULT_RECORDING.typewriterMs).dialogue.revealed,
+    7,
+  );
+
+  clock.tickMs(5000);
+});
+
+test("没有颜色标记的台词分段里也没有颜色", () => {
+  const clock = createVirtualClock();
+  const timeline = createTimeline();
+  const recording = createRecordingStage({ clock, timeline });
+  recording.sayLine("旁白", "一句普通台词", { time: 900 });
+  assert.deepEqual(stateAt(timeline, 0).dialogue.runs, [
+    { text: "一句普通台词", color: null },
+  ]);
+  clock.tickMs(900);
+});
+
+test("彩色台词之后的一句普通台词不会沿用上一句的颜色", () => {
+  const clock = createVirtualClock();
+  const timeline = createTimeline();
+  const recording = createRecordingStage({ clock, timeline });
+  recording.sayLine("旁白", "{红}红字{/}", { time: 900 });
+  clock.tickMs(900);
+  recording.sayLine("旁白", "普通台词", { time: 900 });
+
+  const next = stateAt(timeline, 900);
+  assert.equal(next.dialogue.text, "普通台词");
+  assert.deepEqual(next.dialogue.runs, [{ text: "普通台词", color: null }]);
+  clock.tickMs(900);
+});
+
+test("sayLine 的逐字速度由录制层 config.typewriterMs 控制", () => {
+  const clock = createVirtualClock();
+  const timeline = createTimeline();
+  // 菜单把「文字显示速度」透传成 typewriterMs：200 比整句停留短，所以全部揭示
+  // 在 200ms 内完成，而不是录制层内置的 420ms 默认。
+  const recording = createRecordingStage({ clock, timeline, config: { typewriterMs: 200 } });
+  recording.sayLine("旁白", "你好世界", { time: 1200 });
+  assert.equal(stateAt(timeline, 0).dialogue.revealed, 0);
+  assert.equal(stateAt(timeline, 200).dialogue.revealed, 4, "快档在 200ms 内显完");
+});
+
+test("sayLine 显式配音：停顿点取文字与语音较晚者再加 800ms", async () => {
+  const clock = createVirtualClock();
+  const timeline = createTimeline();
+  const recording = createRecordingStage({
+    clock,
+    timeline,
+    onVoiceDuration: async () => 3000,
+  });
+  const waiting = recording.sayLine("旁白", "你好世界", { time: 1200, audio: "vo" });
+  // 配音时长还没解析时不排定 hold：异步解析期间画面照常显示本句，不卡死帧循环。
+  assert.equal(clock.pending(), 0, "解析前不排定 hold");
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(clock.pending(), 1, "解析后排出一条 hold");
+  // 停顿点 = max(1200, 3000) + 800 = 3800ms，所以 1200ms 时仍未到期。
+  clock.tickMs(1200);
+  assert.equal(clock.pending(), 1, "1200ms 时还没到 3800ms 的停顿点");
+  clock.tickMs(3800);
+  await waiting;
+  assert.equal(clock.pending(), 0);
+});
+
+test("sayLine 文本比语音长时以文本为准再加 800ms", async () => {
+  const clock = createVirtualClock();
+  const timeline = createTimeline();
+  const recording = createRecordingStage({
+    clock,
+    timeline,
+    onVoiceDuration: async () => 500,
+  });
+  // 80 字 → holdFor 远大于 500ms；停顿点 = max(textDone, 500) + 800 = textDone + 800。
+  const textDone = holdFor("字".repeat(80), {}, DEFAULT_RECORDING);
+  const waiting = recording.sayLine("旁白", "字".repeat(80), { audio: "vo" });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(clock.pending(), 1);
+  clock.tickMs(textDone + 800 - 1);
+  assert.equal(clock.pending(), 1, "还差 1ms 不到期");
+  clock.tickMs(textDone + 800);
+  await waiting;
+  assert.equal(clock.pending(), 0);
+});
+
+test("sayLine 配音读不到 / 解不出时直接抛错中止导出", async () => {
+  const clock = createVirtualClock();
+  const timeline = createTimeline();
+  const recording = createRecordingStage({
+    clock,
+    timeline,
+    onVoiceDuration: async () => {
+      throw new Error("找不到配音 vo.wav");
+    },
+  });
+  await assert.rejects(
+    (async () => {
+      const w = recording.sayLine("旁白", "你好", { audio: "vo" });
+      await w;
+    })(),
+    /找不到配音 vo\.wav/,
+  );
 });
 
 test("recorded objects stay chainable and write tweens to the timeline", () => {

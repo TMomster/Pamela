@@ -5,7 +5,7 @@
 // `session.timeline` 登记事件、用 `session.clock.wait` 计时的驱动），与帧循环
 // 并发运行。这样输出侧可以先独立验证，下一步接真舞台时只需换掉 performance。
 
-import { createAudioRecorder, buildAudioTrack } from "./export-audio.js";
+import { createAudioRecorder, buildAudioTrack, createVoiceDurationResolver } from "./export-audio.js";
 import { createVirtualClock, flushTasks } from "./export-clock.js";
 import { createExportMetrics } from "./export-metrics.js";
 import { createExporter, DEFAULT_EXPORT } from "./export-mp4.js";
@@ -46,6 +46,10 @@ export function createExportSession({
   loadVideo = null,
   resolveVideo = null,
   audioOptions = {},
+  /** 注入音频解码上下文类（测试用）；缺省取环境里的 OfflineAudioContext。 */
+  audioContextClass = null,
+  /** 与估算共用的配音时长解码缓存：导出阶段直接命中，避免逐句卡帧循环等解码。 */
+  voiceDurationCache = null,
   metrics: injectedMetrics = null,
   ...exporterOptions
 }) {
@@ -74,6 +78,17 @@ export function createExportSession({
         })
     : null;
 
+  // 录制期就要算准每句配音的时长，把停顿点卡在「语音 / 文字」较晚者：显式配音
+  // 需要解码文件，这里建一个按路径缓存的解析器交给录制层（缺文件直接抛错）。
+  const voiceDuration = audioRecorder
+    ? createVoiceDurationResolver({
+        audioRecorder,
+        loadAudio,
+        AudioContextClass: audioContextClass,
+        cache: voiceDurationCache,
+      })
+    : null;
+
   const renderer = createCanvasRenderer({
     canvas,
     assets,
@@ -93,6 +108,7 @@ export function createExportSession({
     audioRecorder,
     videoRecorder,
     videoFrames,
+    voiceDuration,
     metrics,
   };
   const exporter = createExporter({
