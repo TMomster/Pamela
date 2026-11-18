@@ -191,7 +191,6 @@
 /*
  * 连线使用 2px 平直线与单层柔光；此前 3px 描边加高亮光晕在画布上对比过强。
  */
- * stroke plus a bright glow was the loudest thing on the canvas and read as a
 .graph__edge {
   fill: none;
   stroke: #4aa9d8;
@@ -337,8 +336,6 @@
 /*
  * 端口用空心环表示未连接状态，用实心点表示已连接状态。
  */
- * wired one fills in. 9px, square-cornered card and all — a ring this small is
- * what a drafting symbol looks like. */
 .gsock {
   position: absolute;
   width: 9px;

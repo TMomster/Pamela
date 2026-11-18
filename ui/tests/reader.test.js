@@ -249,9 +249,11 @@ test("帮助写明调试命令：跳转与导出范围，并说明 # 不再是�
   const article = readerArticle("help", "code");
   for (const phrase of [
     "## 调试命令",
-    "# debug::com.player.skip",
+    "# debug::com.player.start",
     "# debug::com.export.start",
     "# debug::com.export.break",
+    "# debug::com.audio.voiceSpeed=数值",
+    "# debug::com.audio.audioSpeed=数值",
     "不再是注释",
   ]) {
     assert.ok(article.body.includes(phrase), `代码一文缺 ${phrase}`);

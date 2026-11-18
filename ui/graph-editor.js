@@ -17,6 +17,7 @@ import {
   nodeTitleFor,
   paramControl,
 } from "./api-spec.js";
+import { DEFAULT_FOV } from "./space.js";
 
 // --- geometry ---
 
@@ -83,10 +84,11 @@ const DEFAULT_SCALE = 1;
  * `params` describes the *call's* arguments, not the node's fields: each entry
  * becomes one input, and `time` is appended as a duration when the method takes
  * one. Nothing here is optional-but-unlisted: a method with no parameters
- * (`enable`, `front`) gets a box with no fields at all.
+ * (`front`) gets a box with no fields at all. `enable` takes an optional fade
+ * time, so it has a duration field like `show` and `hide` do.
  */
 const BEHAVIOR_SPECS = {
-  enable: { title: "显示", types: ["Background", "Character", "Text", "Video"], params: [], hint: "() 显示到舞台" },
+  enable: { title: "显示", types: ["Background", "Character", "Text", "Video"], params: [{ key: "time", label: "时长(毫秒)", type: "number", default: 0 }], hint: "(time?) 显示到舞台，带时长则渐显" },
   hide: { title: "淡出", types: ["Background", "Character", "Text", "Video"], params: [{ key: "time", label: "时长(毫秒)", type: "number", default: 0 }] },
   show: { title: "淡入", types: ["Background", "Character", "Text", "Video"], params: [{ key: "time", label: "时长(毫秒)", type: "number", default: 0 }] },
   alpha: { title: "透明度", types: ["Background", "Character", "Text", "Video"], params: [{ key: "value", label: "0–1", type: "number", default: 1 }, { key: "time", label: "时长(毫秒)", type: "number", default: 0 }] },
@@ -464,6 +466,25 @@ export const NODE_TYPES = {
     typeOf: "Light",
     inputs: ["赋值"],
     params: [{ key: "color", label: "颜色", type: "text", default: "#ffffff" }],
+  },
+  // 摄影机不读素材：所有字段都是取景的数值，默认机位复刻舞台原先那台相机。
+  TypeCamera: {
+    title: "摄影机",
+    category: "对象",
+    color: "#8c6cc4",
+    typeOf: "Camera",
+    inputs: ["赋值"],
+    params: [
+      { key: "x", label: "X", type: "number", default: 0 },
+      { key: "y", label: "Y", type: "number", default: 0 },
+      { key: "z", label: "Z(深度)", type: "number", default: -2000 },
+      { key: "fov", label: "视角(度)", type: "number", default: DEFAULT_FOV },
+      { key: "k1", label: "畸变K1", type: "number", default: 0 },
+      { key: "k2", label: "畸变K2", type: "number", default: 0 },
+      { key: "rotate", label: "转角", type: "number", default: 0 },
+      { key: "rotateH", label: "水平角", type: "number", default: 0 },
+      { key: "rotateV", label: "垂直角", type: "number", default: 0 },
+    ],
   },
   // A group holds object names, not a quoted path — the declaration below
   // writes them through as bare identifiers.
@@ -1860,6 +1881,7 @@ const NAME_BASES = {
   Video: "clip",
   Text: "txt",
   Light: "lamp",
+  Camera: "cam",
   Array: "group",
 };
 
@@ -1938,6 +1960,21 @@ function declarationLines(declareNode, typeNode) {
   }
   const type = objectTypeOf(typeNode);
   const p = typeNode.params ?? {};
+  // 摄影机没有资源参数：把偏离默认值的字段写成具名参数。缺省那台就是老相机，
+  // 所以一个什么都没改的摄影机节点生成 `cam = Camera()`。
+  if (type === "Camera") {
+    const defaults = {
+      x: 0, y: 0, z: -2000, fov: DEFAULT_FOV,
+      k1: 0, k2: 0, rotate: 0, rotateH: 0, rotateV: 0,
+    };
+    const args = [];
+    for (const [key, fallback] of Object.entries(defaults)) {
+      const value = Number(p[key]);
+      if (!Number.isFinite(value) || Math.abs(value - fallback) < 1e-9) continue;
+      args.push(`${key} = ${Number(value.toFixed(6))}`);
+    }
+    return [`${ident} = Camera(${args.join(", ")})`];
+  }
   // A group takes object names, not a quoted path: `group = Array(ch, bg)`.
   const args = type === "Array"
     ? [String(p.members ?? "").trim()]
@@ -2467,9 +2504,9 @@ export function inferGraph(graph) {
         // milliseconds (or waits for everything when -1, or not at all when 0).
         const cueTime = node.params?.time;
         const head = Number.isFinite(cueTime) && cueTime !== 0 ? `cue(${cueTime})` : "cue";
-        lines.push(`${indent(depth)}${head} {`);
+        lines.push(`${indent(depth)}${head}`);
         body(0, depth + 1);
-        lines.push(`${indent(depth)}}`);
+        lines.push(`${indent(depth)}end`);
       } else if (node.type === "FuncDef") {
         const fnName = asIdent(node.params?.name) || "fn";
         const args = String(node.params?.args ?? "")

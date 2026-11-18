@@ -13,6 +13,7 @@
 
 import { EFFECT_KINDS } from "./effect.js";
 import { addSet, addTween } from "./export-timeline.js";
+import { OBJECT_DESTROY } from "./pamela.js";
 
 /** 与 `effect.js` 的 BASE_COUNT 同量级：密度 1 时的粒子数。 */
 const BASE_COUNT = 240;
@@ -99,8 +100,14 @@ export function createEffectRecorder({ clock, timeline }) {
         epoch: 0,
       };
 
+      // `del fx` 之后不再写时间线：变量已经解开，别名再提到它也是空操作。
+      let destroyed = false;
+
       /** 数值属性按时间插值，其余直接落地；与画面记录同一套语义。 */
       function commit(patch, ms = 0) {
+        if (destroyed) {
+          return;
+        }
         const start = clock.now();
         const span = Number(ms) > 0 ? Number(ms) : 0;
         if (span > 0) {
@@ -183,6 +190,15 @@ export function createEffectRecorder({ clock, timeline }) {
         speedTo(value, time) {
           relative("speed", "速度", value, time, true);
           return effect;
+        },
+        /** `del fx`：在当下把粒子层收掉，之后不再写它的状态。 */
+        [OBJECT_DESTROY]() {
+          if (destroyed) {
+            return;
+          }
+          commit({ visible: false, playing: false });
+          destroyed = true;
+          effect.destroyed = true;
         },
       };
 

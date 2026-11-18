@@ -2909,7 +2909,7 @@ export function createDialogueEditor({
       ...(key === "text"
         ? [
             field(
-              "逐字速度（毫秒/字，0 为整句直接出现）",
+              "字速（毫秒）",
               control({
                 kind: "number",
                 value: block.typeSpeed ?? 0,
@@ -2982,28 +2982,28 @@ export function createDialogueEditor({
     const current = primaryId() ? selectionFor(doc, primaryId()) : null;
 
     if (current?.kind === "layer") {
-      props.append(layerSection(current.layer));
+      propsBody.append(layerSection(current.layer));
       return;
     }
 
     if (current?.kind === "region") {
       const section = textSection(regionByKey(current.key)?.name ?? "文本区域", current.key, families);
       section.classList.add("is-selected");
-      props.append(section);
+      propsBody.append(section);
       return;
     }
 
     if (current?.kind === "backdrop") {
       const section = backdropSection();
       section.classList.add("is-selected");
-      props.append(section);
+      propsBody.append(section);
       return;
     }
 
     const hint = document.createElement("p");
     hint.className = "dialog-editor__hint";
     hint.textContent = "选中一个图层或系统组件来编辑它。";
-    props.append(hint);
+    propsBody.append(hint);
   }
 
   /**

@@ -35,8 +35,8 @@ test("line comments get the comment class", () => {
 });
 
 test("调试命令整行上色，且不再当作注释", () => {
-  const html = highlightPamela("# debug::com.player.skip\nx = 1");
-  assert.match(html, /<span class="tok-debug"># debug::com\.player\.skip<\/span>/);
+  const html = highlightPamela("# debug::com.player.start\nx = 1");
+  assert.match(html, /<span class="tok-debug"># debug::com\.player\.start<\/span>/);
   assert.doesNotMatch(html, /tok-comment/);
 });
 

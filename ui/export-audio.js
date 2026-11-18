@@ -5,6 +5,8 @@
 // 与时间点记下来。演出走完后，这些事件按虚拟时钟的时间重放到一个
 // `OfflineAudioContext` 里，得到整段 PCM；再用 WebCodecs 编成 AAC，最后作为
 // 音轨交给 Rust 侧（`export_finish` 的 `audio` 参数）。
+
+import { OBJECT_DESTROY } from "./pamela.js";
 //
 // 为什么整段一次编完：音频要等到演出结束才知道有哪些声音、有多长，而视频
 // 那时已经写完，长度已知；整段编码后一次性 append，`stsz` 的帧长表也就一次
@@ -74,6 +76,10 @@ export function createAudioRecorder({ clock, onError = () => {} } = {}) {
   /** 变量名 → 声音 id，供 `say` 的配音参数使用。 */
   const names = new Map();
   let counter = 0;
+  // 调试指令的基础倍率：走到指令才改，只影响之后录下的 play / rate 事件。
+  // 每条事件自带发生时的 base，混音阶段据此算出脚本速度 × 基础速度。
+  let baseAudioRate = 1;
+  let baseVoiceRate = 1;
 
   const factory = (args, context) => {
     const path = typeof args[0] === "string" ? args[0].trim() : "";
@@ -97,8 +103,22 @@ export function createAudioRecorder({ clock, onError = () => {} } = {}) {
 
     const record = {
       kind: "Audio",
+      // 与播放器一致：声音的统一开关就是带淡变的 play / stop（见 `audio.js`）。
+      // 少了这两个，`eff.enable()` 这种写法在导出里会报「没有方法 enable」。
+      enable(time = 0) {
+        return record.play(time);
+      },
+      disable(time = 0) {
+        return record.stop(time);
+      },
       play(time = 0) {
-        events.push({ kind: "play", id, at: clock.now(), fadeMs: asMs(time) });
+        events.push({
+          kind: "play",
+          id,
+          at: clock.now(),
+          fadeMs: asMs(time),
+          base: baseAudioRate,
+        });
         return record;
       },
       stop(time = 0) {
@@ -133,7 +153,14 @@ export function createAudioRecorder({ clock, onError = () => {} } = {}) {
         if (!Number.isFinite(amount) || amount <= 0) {
           throw new Error("Audio 的速度需要大于 0 的数字");
         }
-        events.push({ kind: "rate", id, at: clock.now(), value: amount, absolute: false });
+        events.push({
+          kind: "rate",
+          id,
+          at: clock.now(),
+          value: amount,
+          absolute: false,
+          base: baseAudioRate,
+        });
         return record;
       },
       /** 把播放速率设成 `value`：1 为原速，范围 0.1–10.0。 */
@@ -142,7 +169,14 @@ export function createAudioRecorder({ clock, onError = () => {} } = {}) {
         if (!Number.isFinite(amount) || amount <= 0) {
           throw new Error("Audio 的速度需要大于 0 的数字");
         }
-        events.push({ kind: "rate", id, at: clock.now(), value: amount, absolute: true });
+        events.push({
+          kind: "rate",
+          id,
+          at: clock.now(),
+          value: amount,
+          absolute: true,
+          base: baseAudioRate,
+        });
         return record;
       },
       /**
@@ -154,6 +188,14 @@ export function createAudioRecorder({ clock, onError = () => {} } = {}) {
        */
       duration() {
         return Promise.resolve(0);
+      },
+      /** `del bgm`：在当下停下这条声音，时间线上不再让它响下去。 */
+      [OBJECT_DESTROY]() {
+        if (record.destroyed) {
+          return;
+        }
+        events.push({ kind: "stop", id, at: clock.now(), fadeMs: 0 });
+        record.destroyed = true;
       },
     };
     return record;
@@ -178,7 +220,15 @@ export function createAudioRecorder({ clock, onError = () => {} } = {}) {
       names.set(key, id);
     }
     if (id) {
-      events.push({ kind: "play", id, at: clock.now(), fadeMs: 0 });
+      events.push({
+        kind: "play",
+        id,
+        at: clock.now(),
+        fadeMs: 0,
+        base: baseVoiceRate,
+        // 配音用的是独立声轨：脚本给 Audio 变量写的 speed 属于效果音，不带过来。
+        voice: true,
+      });
     }
     return Promise.resolve(0);
   };
@@ -204,6 +254,15 @@ export function createAudioRecorder({ clock, onError = () => {} } = {}) {
     audio: factory,
     events,
     sounds,
+    /** `# debug::com.audio.*Speed`：只影响之后录下的 play / rate 事件。 */
+    setAudioSpeed(value) {
+      baseAudioRate = clipRate(value);
+    },
+    setVoiceSpeed(value) {
+      baseVoiceRate = clipRate(value);
+    },
+    /** 配音时长解析器按调用这一刻的基础倍率折算语音时长。 */
+    getVoiceSpeed: () => baseVoiceRate,
     /** 演出里出现过声音事件吗：没有就完全不必建混音上下文。 */
     hasSound() {
       return events.some(
@@ -265,7 +324,9 @@ export function planAudio({ events = [], sounds = new Map() } = {}) {
       continue;
     }
     let level = sound.volume;
+    // `rate` 是脚本自己的速度；`base` 是事件记下的调试基础倍率，混音用两者之积。
     let rate = 1;
+    let base = 1;
     let open = null;
     let loop = Boolean(sound.loop);
 
@@ -288,6 +349,7 @@ export function planAudio({ events = [], sounds = new Map() } = {}) {
         } else {
           points.push({ at: event.at, value: level });
         }
+        base = Number(event.base) > 0 ? Number(event.base) : base;
         open = {
           id,
           path: sound.path,
@@ -295,7 +357,8 @@ export function planAudio({ events = [], sounds = new Map() } = {}) {
           startMs: event.at,
           stopMs: null,
           loop,
-          rate,
+          // 配音只按基础倍率走：Audio 变量自己的 speed 留在效果音那一轨上。
+          rate: event.voice ? base : base * rate,
           offsetMs: 0,
           gain: points,
         };
@@ -330,7 +393,9 @@ export function planAudio({ events = [], sounds = new Map() } = {}) {
         // 切速时把当前段收尾，并从「已消耗的素材位置」接上一段新速率的段；
         // 没在响时只改下次 play 的起始速率（与 Video 的切速一致）。
         const amount = Number(event.value);
+        const baseRate = Number(event.base) > 0 ? Number(event.base) : base;
         const target = clipRate(event.absolute ? amount : rate * amount);
+        const effective = baseRate * target;
         if (open) {
           const consumed = (event.at - open.startMs) * open.rate;
           open.stopMs = event.at;
@@ -342,12 +407,13 @@ export function planAudio({ events = [], sounds = new Map() } = {}) {
             startMs: event.at,
             stopMs: null,
             loop,
-            rate: target,
+            rate: effective,
             offsetMs: Math.max(0, consumed),
             gain: [{ at: event.at, value: level }],
           };
         }
         rate = target;
+        base = baseRate;
       } else if (event.kind === "loop" || event.kind === "once") {
         loop = Boolean(event.value);
         if (open) {
@@ -460,7 +526,9 @@ export function createVoiceDurationResolver({
         ),
       );
     }
-    return decodeMs(path);
+    // 这一句认下调用时的基础倍率：配音按它播放，台词里的语音计时同步缩短。
+    const rate = audioRecorder?.getVoiceSpeed?.() || 1;
+    return decodeMs(path).then((ms) => ms / rate);
   };
 }
 

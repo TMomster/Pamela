@@ -40,10 +40,13 @@ const PARAM_LABELS = {
   volume: "音量", loop: "循环", mute: "静音", size: "尺寸", density: "密度",
   speed: "速度", intensity: "强度", spread: "散射角", range: "传播距离",
   bloom: "泛光", soft: "柔光", width: "灯宽", audio: "配音", weight: "字重",
+  fov: "视角(度)", k1: "畸变K1", k2: "畸变K2",
   // 自动配音：true / false，或 1–10 的语速。
   on: "自动配音",
   // 逐帧图片组：序号从 0 起，也可以直接写图片名。
   index: "序号或图名",
+  // 清除：要复原的效果，写方法名本身且不带引号（`flush(scale)`）。
+  target: "效果名(不带引号)",
 };
 
 const NUMBER_PARAMS = new Set([
@@ -52,7 +55,7 @@ const NUMBER_PARAMS = new Set([
   "width", "rotateH", "rotateV", "rotation", "rotateTo", "alpha", "blur",
   "brightness", "contrast", "saturate", "scale", "scaleTo", "volume", "size",
   "sizeTo", "density", "densityTo", "speed", "speedTo",
-  "weight",
+  "weight", "fov", "k1", "k2",
 ]);
 
 const BOOL_PARAMS = new Set(["loop", "mute", "hasDefault"]);
@@ -277,7 +280,7 @@ const NAMESPACE_SUFFIX = {
 
 /** The object types that exist on the canvas. */
 export const OBJECT_TYPES = Object.freeze([
-  "Background", "Character", "Text", "Audio", "Effect", "Video", "Light", "Array",
+  "Background", "Character", "Text", "Audio", "Effect", "Video", "Light", "Camera", "Array",
 ]);
 
 /** What a behaviour node writes after the object's name. */

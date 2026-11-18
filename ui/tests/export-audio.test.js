@@ -118,6 +118,58 @@ test("say(text, 纯单词误名) 不像路径时不误报缺文件", () => {
   assert.equal(recorder.sounds.size, 0);
 });
 
+test("速度指令记在事件上，脚本 speed 乘在基础倍率之上", () => {
+  const clock = createVirtualClock();
+  const recorder = createAudioRecorder({ clock });
+  const bgm = recorder.audio(["bgm.mp3"], { assignee: "bgm" });
+  bgm.play();
+  recorder.setAudioSpeed(2);
+  clock.tickMs(1000);
+  const se = recorder.audio(["se.wav"], { assignee: "se" });
+  se.speedTo(0.5);
+  se.play();
+
+  assert.deepEqual(
+    recorder.events.map((event) => [event.kind, event.base]),
+    [
+      ["play", 1],
+      ["rate", 2],
+      ["play", 2],
+    ],
+  );
+  const { voices } = planAudio(recorder);
+  assert.equal(voices.find((voice) => voice.path === "bgm.mp3").rate, 1);
+  assert.equal(voices.find((voice) => voice.path === "se.wav").rate, 1, "2 × 0.5");
+});
+
+test("say 的配音不继承 Audio 变量的 speed，只按 voiceSpeed", () => {
+  const clock = createVirtualClock();
+  const recorder = createAudioRecorder({ clock });
+  const vo = recorder.audio(["vo.mp3"], { assignee: "vo" });
+  vo.speedTo(3);
+  recorder.setVoiceSpeed(0.5);
+  recorder.audio.voice("vo");
+
+  const { voices } = planAudio(recorder);
+  assert.equal(voices[0].rate, 0.5, "效果音的 3 倍速不带进配音轨");
+});
+
+test("同一段音频在速度指令前后切速时，各段按各自倍率接续", () => {
+  const clock = createVirtualClock();
+  const recorder = createAudioRecorder({ clock });
+  const bgm = recorder.audio(["bgm.mp3"], { assignee: "bgm" });
+  bgm.play();
+  clock.tickMs(1000);
+  recorder.setAudioSpeed(2);
+  bgm.speed(2);
+
+  const { voices } = planAudio(recorder);
+  assert.equal(voices[0].rate, 1, "前一段保持原速");
+  assert.equal(voices[0].stopMs, 1000);
+  assert.equal(voices[1].rate, 4, "后一段是基础 2 × 脚本 2");
+  assert.equal(voices[1].startMs, 1000);
+});
+
 // --- 计划 ---
 
 test("planAudio turns play / volume / stop into one segment with a gain curve", () => {
@@ -778,6 +830,27 @@ test("createVoiceDurationResolver 解析出配音时长（毫秒）并按路径�
   assert.equal(await resolve("Audio/vo.wav"), 1200, "秒 → 毫秒");
   assert.equal(await resolve("Audio/vo.wav"), 1200, "同一路径命中缓存");
   assert.equal(loads, 1, "同一路径只解码一次");
+});
+
+test("voiceSpeed 记在配音事件上，语音完成的计时按倍率缩短", async () => {
+  const clock = createVirtualClock();
+  const recorder = createAudioRecorder({ clock });
+  recorder.setVoiceSpeed(2);
+  recorder.audio.voice("Audio/vo.wav");
+  assert.equal(recorder.events[0].base, 2);
+  assert.equal(planAudio(recorder).voices[0].rate, 2);
+
+  class FakeCtx {
+    decodeAudioData() {
+      return Promise.resolve({ duration: 1.2 });
+    }
+  }
+  const resolve = createVoiceDurationResolver({
+    audioRecorder: recorder,
+    loadAudio: async () => new ArrayBuffer(16),
+    AudioContextClass: FakeCtx,
+  });
+  assert.equal(await resolve("Audio/vo.wav"), 600, "原始 1200ms 除以 2");
 });
 
 test("createVoiceDurationResolver 认得已声明的 Audio 变量名", async () => {

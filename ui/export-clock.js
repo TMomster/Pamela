@@ -106,10 +106,8 @@ export function createVirtualClock({
 
   const frame = () => scheduleFrame().promise;
 
-  /** 推进 `stepTicks`，resolve 所有到期定时器与本帧回调。 */
-  function tickBy(stepTicks) {
-    ticks += Math.max(0, Math.round(stepTicks));
-
+  /** resolve 所有到期定时器与本帧回调；`ticks` 由调用方先推进。 */
+  function resolveReady() {
     const due = timers
       .filter((handle) => !handle.done && !handle.cancelled && handle.due <= ticks)
       .sort((a, b) => a.due - b.due || a.sequence - b.sequence);
@@ -132,7 +130,43 @@ export function createVirtualClock({
       handle.done = true;
       handle.resolve();
     }
+  }
+
+  /** 推进 `stepTicks`，resolve 所有到期定时器与本帧回调。 */
+  function tickBy(stepTicks) {
+    ticks += Math.max(0, Math.round(stepTicks));
+    resolveReady();
     return now();
+  }
+
+  /**
+   * 跳到下一个到期事件并 resolve 它；没有待办时返回 false。
+   *
+   * 与 `createAdvancingClock.advance()` 同义。导出前导段（调试范围起点之前）
+   * 用它快进：那些帧不进成片，没必要逐帧让出事件循环。
+   */
+  function advance() {
+    let due = null;
+    for (const handle of timers) {
+      if (handle.done || handle.cancelled) {
+        continue;
+      }
+      if (due === null || handle.due < due) {
+        due = handle.due;
+      }
+    }
+    const waitingFrame = frames.some((handle) => !handle.done);
+    if (due === null && !waitingFrame) {
+      return false;
+    }
+    if (due === null) {
+      ticks += frameTicks;
+    } else {
+      // 与逐帧推进一致：事件落在它到期后的第一个帧边界上。
+      ticks = Math.max(ticks + frameTicks, Math.ceil(due / frameTicks) * frameTicks);
+    }
+    resolveReady();
+    return true;
   }
 
   /** 推进一帧；返回推进后的毫秒时间。 */
@@ -156,6 +190,7 @@ export function createVirtualClock({
     scheduleFrame,
     tick,
     tickMs,
+    advance,
     cancel,
     random,
     pending,

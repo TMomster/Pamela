@@ -162,7 +162,7 @@ test("a repaint skips what did not change", () => {
   assert.match(main, /if \(text === tintText && host === tintHost && hidden === tintHidden\) \{/);
   assert.match(
     main,
-    /addEventListener\("scroll", \(\) => \{\s*syncGutterScroll\(\);\s*syncTintScroll\(\);/,
+    /addEventListener\("scroll", \(\) => \{\s*restoreEditScroll\(\);\s*inPane\(\(\) => \{\s*syncGutterScroll\(\);\s*syncTintScroll\(\);/,
   );
   assert.match(main, /host\.style\.transform = `translateY\(\$\{-dom\.editorText\.scrollTop\}px\)`/);
 });
@@ -188,6 +188,24 @@ test("滚动同步：行号与高亮层靠平移跟随，不把滚动量抄给�
   // 字体度量跟着文字走，所以搬到了内层；外层只负责裁切。
   assert.match(panels, /\.editor__gutter-inner \{[\s\S]*?white-space: pre;/);
   assert.match(panels, /\.editor__highlight-inner \{[\s\S]*?white-space: pre;/);
+});
+
+test("改行数的输入不会把视野内的光标顶到首行", () => {
+  const main = read("main.js");
+  // 回车/退格与合成上屏时浏览器会额外滚动 textarea；编辑前记下滚动量，
+  // scroll 到达后只在光标仍在原视野时按回去，光标跑出视野仍照常跟随。
+  assert.match(main, /function guardEditorScrollOnEdit\(textarea\)/);
+  assert.match(main, /function caretWithinScroll\(textarea, scrollTop\)/);
+  assert.match(main, /return top >= scrollTop && top \+ lineHeight <= scrollTop \+ textarea\.clientHeight;/);
+  assert.match(main, /textarea\.addEventListener\(\s*"keydown",[\s\S]*?event\.key === "Enter"/);
+  assert.match(main, /textarea\.addEventListener\(\s*"compositionstart"/);
+  assert.match(main, /textarea\.addEventListener\(\s*"beforeinput"/);
+  assert.match(main, /textarea\.addEventListener\("wheel", disarm/);
+  assert.match(main, /const restoreEditScroll = guardEditorScrollOnEdit\(d\.editorText\);/);
+  assert.match(
+    main,
+    /d\.editorText\.addEventListener\("scroll", \(\) => \{\s*restoreEditScroll\(\);/,
+  );
 });
 
 test("the error overlay and its CSS exist, inert placeholders do not", () => {
@@ -357,7 +375,7 @@ test("查找替换：栏在 find-bar.js，main.js 只做装配与接线", () => 
   const main = read("main.js");
   const find = read("find-bar.js");
   assert.match(main, /import \{ createFindBar \} from "\.\/find-bar\.js"/);
-  assert.match(main, /const findBar = createFindBar\(\{ dom, editorRangeRect \}\)/);
+  assert.match(main, /pane\.findBar = createFindBar\(\{ dom: d, editorRangeRect \}\)/);
   assert.doesNotMatch(main, /const runFind = /);
   // 输入时只重算匹配、不抢光标；滚动与字体就绪时都要跟着重画。
   assert.match(main, /if \(findBar\.isOpen\(\)\) \{\s*findBar\.run\(false\);/);
@@ -521,6 +539,32 @@ test("mpe：三个入口都先编译，保存指纹仍按原文", () => {
   const rust = readFileSync(path.join(ui, "..", "src", "project.rs"), "utf8");
   assert.match(rust, /SHORT_SCRIPT_SUFFIX: &str = "\.mpe"/);
   assert.match(rust, /lower\.ends_with\(SHORT_SCRIPT_SUFFIX\)/);
+});
+
+test("分屏标签：右键四项、左右固定与帮助标签常驻", () => {
+  const main = read("main.js");
+  const reader = read("reader-panel.js");
+  const html = read("index.html");
+  const css = read("styles/panels.css");
+
+  for (const label of ["关闭当前页", "关闭所有标签页", "固定在左侧", "固定在右侧"]) {
+    assert.ok(main.includes(`label: "${label}"`), `右键菜单缺少 ${label}`);
+  }
+  assert.match(main, /const panes = \[/);
+  assert.match(main, /function ensureSecondaryPane\(\)/);
+  assert.match(main, /function pinTab\(pane, key, side\)/);
+  assert.match(main, /function wireSplitter\(splitter, host\)/);
+  assert.match(main, /splitter\.addEventListener\("pointermove", onMove\)/);
+  assert.match(main, /if \(splitPanes && panes\.some\(\(pane\) => pane\.order\.length === 0\)\)/);
+  assert.match(main, /pane\.dom\.readerView\.hidden = !pane\.readerActive;/);
+  assert.match(main, /tab\.dataset\.pane = paneId;/);
+  assert.match(main, /tab\.dataset\.tab = tabKey;/);
+  assert.match(html, /id="editor-panes"/);
+  assert.match(css, /\.editor__splitter \{/);
+  // 离开阅读器只收起文章，不摘掉标签；重新点回标签还是同一篇文章。
+  assert.match(reader, /pane\.readerActive = false;/);
+  assert.match(reader, /addReaderTab\(pane\)/);
+  assert.match(main, /pane\.order\.includes\(readerTabKey\(\)\)/);
 });
 
 test("舞台设置：舞台内的一层，只有节标题与四个档位", () => {

@@ -68,6 +68,93 @@ export const CAMERA_DISTANCE = 2000;
 export const DEPTH_LIMIT = Object.freeze({ near: -1500, far: 8000 });
 
 /**
+ * 逻辑画幅的一半高。FOV 的默认值、可见范围都从它派生，不另写一份「魔数」。
+ * 画幅本身由舞台定为 1920×1080；这里只用到高度，因为 FOV 是垂直方向。
+ */
+const VIEW_HALF_HEIGHT = 540;
+const VIEW_HALF_WIDTH = 960;
+
+/** 垂直 FOV 的默认角度：刚好让 z=0 的 1920×1080 舞台占满画面。 */
+export const DEFAULT_FOV = (2 * Math.atan(VIEW_HALF_HEIGHT / CAMERA_DISTANCE) * 180) / Math.PI;
+
+/** FOV 的硬边界；接近 180° 时正切会爆掉，所以再大也没有意义。 */
+export const FOV_LIMIT = Object.freeze({ min: 1, max: 179 });
+
+/**
+ * 把任意输入收成一台相机。
+ *
+ * 缺省值就是项目原先那台固定相机：站在 z = -CAMERA_DISTANCE，正对 +z，
+ * FOV 由画幅反推，没有畸变。于是没写过 Camera 的剧本拿到的是同一套数。
+ */
+export function normalizeCamera(camera = {}) {
+  const source = camera ?? {};
+  const number = (value, fallback = 0) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  };
+  const fov = Math.min(
+    FOV_LIMIT.max,
+    Math.max(
+      FOV_LIMIT.min,
+      number(source.fov ?? source.fieldOfView, DEFAULT_FOV),
+    ),
+  );
+  return {
+    x: number(source.x ?? source.h),
+    y: number(source.y ?? source.v),
+    z: number(source.z, -CAMERA_DISTANCE),
+    rotate: number(source.rotate ?? source.rotation),
+    rotateH: number(source.rotateH),
+    rotateV: number(source.rotateV),
+    fov,
+    k1: number(source.k1),
+    k2: number(source.k2),
+  };
+}
+
+/** 与旧固定相机完全等价的相机；所有缺省路径都走它。 */
+export const DEFAULT_CAMERA = Object.freeze(normalizeCamera());
+
+const RAD = Math.PI / 180;
+
+/**
+ * 把相机展开成投影需要的一堆量：朝向、到舞台面的距离、取景比例。
+ *
+ * `focus` 是相机沿自身推轴到舞台面的距离；`viewScale` 把「世界在舞台面上的
+ * 投影」换算成画面像素。默认相机下 `viewScale` 正好是 1，所以老剧本不动。
+ */
+function cameraView(camera) {
+  const c = normalizeCamera(camera);
+  const focus = Math.max(1, -c.z);
+  const halfHeight = focus * Math.tan((c.fov * RAD) / 2);
+  const viewScale = VIEW_HALF_HEIGHT / halfHeight;
+  const { right, up, normal } = orientationOf(c);
+  return { ...c, focus, viewScale, right, up, normal };
+}
+
+/**
+ * 径向畸变：Brown-Conrady 的前两项。
+ *
+ * `k1 < 0` 是桶形，`k1 > 0` 是枕形；`k2` 管画面边缘的二阶弯曲。坐标先按
+ * 半画幅归一，所以 16:9 的四个角都得到同一个半径基准。没有系数时原样返回，
+ * 不引入任何浮点误差。
+ */
+export function distortPoint(point = {}, camera) {
+  const c = normalizeCamera(camera);
+  const scale = Number.isFinite(Number(point.scale)) ? Number(point.scale) : 1;
+  if (!c.k1 && !c.k2) {
+    return { x: Number(point.x) || 0, y: Number(point.y) || 0, scale };
+  }
+  const x = Number(point.x) || 0;
+  const y = Number(point.y) || 0;
+  const nx = x / VIEW_HALF_WIDTH;
+  const ny = y / VIEW_HALF_HEIGHT;
+  const r2 = nx * nx + ny * ny;
+  const factor = Math.max(0.05, 1 + c.k1 * r2 + c.k2 * r2 * r2);
+  return { x: x * factor, y: y * factor, scale: scale * factor };
+}
+
+/**
  * 三个轴。
  *
  * `index` 是它在坐标三元组里的位置，`label` 是脚本文档里的叫法：平、升、推，
@@ -97,25 +184,30 @@ export const STAGE_PLANE = "W";
 /** 观众看到的那一面：相机从 -z 一侧拍到的 -W 面。 */
 export const VIEW_FACE = "-W";
 
-const RAD = Math.PI / 180;
-
 /**
- * 一个 z 的透视比例，1 是舞台平面。
+ * 一个 z 在当前相机下的画面比例；默认相机、z=0 时正好是 1。
  *
- * `perspective` 为假时按正交投影算：深度不再改变大小，比例恒为 1。舞台默认
- * 就是这种空间（`stage.perspective(true)` 才打开灭点），所以「同一个 z 方向
- * 上的所有物体都是重叠的」——只有 z 决定谁盖住谁，不决定谁更大。
+ * `perspective` 为假时按正交投影算：深度不再改变大小，但 FOV 仍改变取景范围，
+ * 所以比例恒为相机的 `viewScale`。舞台默认就是正交空间（要 `stage.perspective(true)`
+ * 才打开灭点），所以「同一个 z 方向上的所有物体都是重叠的」——只有 z 决定谁
+ * 盖住谁，不决定谁更大。
  *
  * @param {number} z 深度。
- * @param {boolean} [perspective] 是否按透视投影；省略按透视算（几何函数本身
- *   的语义），舞台与导出都会把自己的开关显式传进来。
+ * @param {boolean} [perspective] 是否按透视投影。
+ * @param {object} [camera] 当前相机；省略就是内置默认相机。
  */
-export function depthScale(z, perspective = true) {
+export function depthScale(z, perspective = true, camera) {
+  const view = cameraView(camera);
   if (!perspective) {
-    return 1;
+    return view.viewScale;
   }
   const depth = clampDepth(z);
-  return CAMERA_DISTANCE / (CAMERA_DISTANCE + depth);
+  const qz =
+    (0 - view.x) * view.normal[0]
+    + (0 - view.y) * view.normal[1]
+    + (depth - view.z) * view.normal[2];
+  const scale = view.viewScale * view.focus / Math.max(1, qz);
+  return distortPoint({ x: 0, y: 0, scale }, camera).scale;
 }
 
 /** 把 z 收进可取的范围；写错的数字当作 0（舞台平面）。 */
@@ -303,27 +395,38 @@ export function isFlatPose(pose = {}) {
 // --- 投影 ------------------------------------------------------------------
 
 /**
- * 世界里的一个点投到 W 面上。
+ * 世界里的一个点投到当前相机的画面上。
  *
- * 从相机 (0, 0, -CAMERA_DISTANCE) 沿 +z 打出的一条射线，穿过这一点之后落在
- * z = 0 处的那个位置。返回的是舞台坐标（原点在中心、y 向上）与那次投影的
- * 比例 —— 舞台上写 `left/top` 与导出的 `ctx.translate` 都用它。
+ * 相机可以是任意位置与朝向；返回的是画面坐标（原点在中心、y 向上）与那次
+ * 投影的比例 —— 舞台上写 `left/top` 与导出的 `ctx.translate` 都用它。世界
+ * 里的坐标只有一套，变的是相机从这套坐标里取哪一块、放到多大的画面上。
  *
- * `perspective` 为假时是正交投影：位置原样搬过去，比例 1，深度只决定前后。
+ * `perspective` 为假时是正交投影：深度不缩放，只有相机的 FOV 改变取景。
+ * 缺省相机复刻原先那台固定相机，所以没写过 Camera 的剧本逐像素不变。
  *
  * @param {{ x?: number, y?: number, z?: number }} point
- * @param {{ perspective?: boolean }} [options]
+ * @param {{ perspective?: boolean, camera?: object }} [options]
  * @returns {{ x: number, y: number, scale: number }}
  */
-export function projectPoint(point = {}, { perspective = true } = {}) {
+export function projectPoint(point = {}, { perspective = true, camera } = {}) {
+  const view = cameraView(camera);
   const x = Number(point.x) || 0;
   const y = Number(point.y) || 0;
-  if (!perspective) {
-    return { x, y, scale: 1 };
-  }
   const depth = clampDepth(point.z);
-  const scale = CAMERA_DISTANCE / Math.max(1, CAMERA_DISTANCE + depth);
-  return { x: x * scale, y: y * scale, scale };
+  let projected;
+  if (!perspective) {
+    projected = { x: x * view.viewScale, y: y * view.viewScale, scale: view.viewScale };
+  } else {
+    const dx = x - view.x;
+    const dy = y - view.y;
+    const dz = depth - view.z;
+    const qx = dx * view.right[0] + dy * view.right[1] + dz * view.right[2];
+    const qy = dx * view.up[0] + dy * view.up[1] + dz * view.up[2];
+    const qz = dx * view.normal[0] + dy * view.normal[1] + dz * view.normal[2];
+    const scale = (view.viewScale * view.focus) / Math.max(1, qz);
+    projected = { x: qx * scale, y: qy * scale, scale };
+  }
+  return distortPoint(projected, camera);
 }
 
 /** 一个盒子四个角在自身坐标里的位置（y 在上），按顺时针排。 */
@@ -362,7 +465,7 @@ export const QUAD_TRIANGLES = Object.freeze([
  * @returns {{ flat: boolean, center: {x: number, y: number}, corners: Record<string, {x: number, y: number}>,
  *   depth: number, orientation: object, facing: boolean }}
  */
-export function projectPose(pose = {}, box = {}, { perspective = true } = {}) {
+export function projectPose(pose = {}, box = {}, { perspective = true, camera } = {}) {
   const depth = clampDepth(pose.z);
   const x = Number(pose.x) || 0;
   const y = Number(pose.y) || 0;
@@ -381,16 +484,12 @@ export function projectPose(pose = {}, box = {}, { perspective = true } = {}) {
     const wx = matrix[0] * lx + matrix[1] * ly + x;
     const wy = matrix[3] * lx + matrix[4] * ly + y;
     const wz = matrix[6] * lx + matrix[7] * ly + depth;
-    // 正交空间里每个角都不按深度缩放：转过身的物体仍会被压短，但不会朝
-    // 灭点收过去。
-    const flat = perspective
-      ? CAMERA_DISTANCE / Math.max(1, CAMERA_DISTANCE + wz)
-      : 1;
-    corners[handle] = { x: wx * flat, y: wy * flat };
+    // 每个角各自过一遍相机：正交/透视、焦距、位置、朝向和畸变都在那一步生效。
+    corners[handle] = projectPoint({ x: wx, y: wy, z: wz }, { perspective, camera });
   }
   return {
     flat: isFlatPose(pose),
-    center: projectPoint({ x, y, z: depth }, { perspective }),
+    center: projectPoint({ x, y, z: depth }, { perspective, camera }),
     corners,
     depth,
     orientation,

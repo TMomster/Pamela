@@ -423,7 +423,7 @@ test("the tokeniser skips whitespace and comments to end of line", () => {
 
 test("井号开头的行是调试命令，不再是注释", () => {
   // 整行收成一个 `debug` 记号：名字交给解析器核对。
-  assert.deepEqual(types("# debug::com.player.skip\n"), ["debug", "newline", "eof"]);
+  assert.deepEqual(types("# debug::com.player.start\n"), ["debug", "newline", "eof"]);
   const scanned = tokenize("  # debug::com.export.start\nsay(\"x\")");
   assert.equal(scanned.error, undefined);
   assert.equal(scanned.tokens[0].type, "debug");
@@ -445,7 +445,51 @@ test("认不出的调试命令在解析期报错，并列出可用的名字", ()
   const parsed = parse(scanned.tokens);
   assert.ok(parsed.error, "expected an error");
   assert.match(parsed.error.message, /未知的调试命令/);
-  assert.match(parsed.error.message, /debug::com\.player\.skip/);
+  assert.match(parsed.error.message, /debug::com\.player\.start/);
+});
+
+test("音频速度调试命令解析出数值，范围外与空值报错", () => {
+  const parsed = parse(tokenize("# debug::com.audio.voiceSpeed=1.5").tokens);
+  assert.equal(parsed.error, undefined);
+  assert.deepEqual(parsed.program.statements[0], {
+    type: "debug",
+    target: "audio",
+    command: "voiceSpeed",
+    value: 1.5,
+    text: "debug::com.audio.voiceSpeed=1.5",
+    line: 1,
+  });
+  const audio = parse(tokenize("# debug::com.audio.audioSpeed=0.1").tokens);
+  assert.equal(audio.program.statements[0].value, 0.1);
+
+  for (const text of [
+    "# debug::com.audio.voiceSpeed=0",
+    "# debug::com.audio.audioSpeed=11",
+    "# debug::com.audio.voiceSpeed=x",
+    "# debug::com.audio.voiceSpeed",
+  ]) {
+    const bad = parse(tokenize(text).tokens);
+    assert.ok(bad.error, `${text} 应该报错`);
+    assert.match(bad.error.message, /速度值需要在 0.1 到 10 之间|未知的调试命令/);
+  }
+});
+
+test("scanDebugCommands 读出速度值与 known", () => {
+  const found = scanDebugCommands(
+    [
+      "# debug::com.audio.voiceSpeed=2",
+      "# debug::com.audio.audioSpeed=0.5",
+      "# debug::com.audio.voiceSpeed=99",
+    ].join("\n"),
+  );
+  assert.deepEqual(
+    found.map((command) => [command.command, command.value, command.known]),
+    [
+      ["voiceSpeed", 2, true],
+      ["audioSpeed", 0.5, true],
+      [undefined, undefined, false],
+    ],
+  );
 });
 
 test("a block comment covers what it spans, lines inside it included", () => {
@@ -553,7 +597,7 @@ test("@ 只能接在调用后面", () => {
 test("@ 指向没有时间参数的方法时，解析器就报错", () => {
   // 静态就认得出的方法名（参数表里没有 `time`）在解析期报出，编辑器据此画错号。
   for (const [source, name] of [
-    ["ch.enable() @ 1000", "enable"],
+    ["ch.front() @ 1000", "front"],
     ["ch.move(1, 2).font(20) @ 1000", "font"],
   ]) {
     const parsed = parse(tokenize(source).tokens);
@@ -700,7 +744,7 @@ test("statements without a separator are rejected", () => {
 });
 
 test("a cue block parses into a statement of its own", () => {
-  const parsed = parse(tokenize("cue {\n  a.b(1)\n}").tokens);
+  const parsed = parse(tokenize("cue\n  a.b(1)\nend").tokens);
   assert.equal(parsed.error, undefined);
   assert.deepEqual(parsed.program.statements, [
     {
@@ -731,7 +775,7 @@ test("a cue block parses into a statement of its own", () => {
 });
 
 test("a trailing wait is recorded on the block", () => {
-  const parsed = parse(tokenize("cue {\n  a.b()\n} wait").tokens);
+  const parsed = parse(tokenize("cue\n  a.b()\nend wait").tokens);
   assert.equal(parsed.error, undefined);
   // One statement, not two: `wait` belongs to the block rather than standing
   // on its own.
@@ -740,7 +784,7 @@ test("a trailing wait is recorded on the block", () => {
 });
 
 test("a positive time argument is parsed as an expression", () => {
-  const parsed = parse(tokenize("cue(3000) {\n  a.b()\n}").tokens);
+  const parsed = parse(tokenize("cue(3000)\n  a.b()\nend").tokens);
   assert.equal(parsed.error, undefined);
   const cue = parsed.program.statements[0];
   assert.equal(cue.type, "cue");
@@ -750,7 +794,7 @@ test("a positive time argument is parsed as an expression", () => {
 });
 
 test("a negative time argument (auto-wait) parses", () => {
-  const parsed = parse(tokenize("cue(-1) {\n  a.b()\n}").tokens);
+  const parsed = parse(tokenize("cue(-1)\n  a.b()\nend").tokens);
   assert.equal(parsed.error, undefined);
   const time = parsed.program.statements[0].time;
   // The tokenizer keeps `-` as its own token, so a negative literal is a unary
@@ -761,9 +805,38 @@ test("a negative time argument (auto-wait) parses", () => {
 });
 
 test("cue without a time argument has no time node", () => {
-  const parsed = parse(tokenize("cue {\n  a.b()\n}").tokens);
+  const parsed = parse(tokenize("cue\n  a.b()\nend").tokens);
   assert.equal(parsed.error, undefined);
   assert.equal(parsed.program.statements[0].time, null);
+});
+
+test("cue @ time is the companion form of the cue's time", () => {
+  for (const source of ["cue @ 5000\n  a.b()\nend", "cue @ 5000 a.b()"]) {
+    const parsed = parse(tokenize(source).tokens);
+    assert.equal(parsed.error, undefined, source);
+    const cue = parsed.program.statements[0];
+    assert.equal(cue.time?.type, "literal", source);
+    assert.equal(cue.time?.value, 5000, source);
+    assert.equal(cue.wait, false, source);
+  }
+});
+
+test("an inline cue keeps its own @ apart from the statement's @", () => {
+  const parsed = parse(tokenize("cue @ 5000 ch.move(1, 2) @ 3000").tokens);
+  assert.equal(parsed.error, undefined);
+  const cue = parsed.program.statements[0];
+  assert.equal(cue.time.value, 5000);
+  assert.equal(cue.statements[0].value.type, "chainTime");
+  assert.equal(cue.statements[0].value.ms.value, 3000);
+});
+
+test("end is a reserved word and braces no longer close a cue", () => {
+  assert.match(parse(tokenize("end").tokens).error.message, /只能用来结束/);
+  assert.ok(parse(tokenize("end = 1").tokens).error);
+  assert.match(
+    parse(tokenize("cue {\n  a.b()\n}").tokens).error.message,
+    /不再使用花括号/,
+  );
 });
 
 test("a cue may take one statement instead of a block", () => {
@@ -797,8 +870,8 @@ test("a one-statement cue may still end on wait", () => {
 });
 
 test("a cue's wait may name its own time, with or without brackets", () => {
-  for (const closing of ["} wait 5000", "} wait(5000)"]) {
-    const parsed = parse(tokenize(`cue {\n  a.b()\n${closing}`).tokens);
+  for (const closing of ["end wait 5000", "end wait(5000)"]) {
+    const parsed = parse(tokenize(`cue\n  a.b()\n${closing}`).tokens);
     assert.equal(parsed.error, undefined);
     assert.equal(parsed.program.statements.length, 1, "wait belongs to the block");
     const cue = parsed.program.statements[0];
@@ -822,7 +895,7 @@ test("wait may be written with its time in brackets", () => {
 });
 
 test("a malformed wait on a cue is reported rather than half-parsed", () => {
-  for (const source of ["cue {\n  a.b()\n} wait(x)", "cue a.b() wait(500"]) {
+  for (const source of ["cue\n  a.b()\nend wait(x)", "cue a.b() wait(500"]) {
     const parsed = parse(tokenize(source).tokens);
     assert.ok(parsed.error, `expected an error for ${source}`);
     assert.equal(parsed.program, undefined);
@@ -839,7 +912,7 @@ test("cue(N) proceeds after N ms even if the group is still running", async () =
   const timers = [];
   const sleep = (ms) => new Promise((resolve) => timers.push({ ms, resolve }));
   const { events, gates, constructors } = fakeActor();
-  const running = run('a = Actor()\ncue(50) {\n  a.begin("long")\n}\na.begin("after")', {
+  const running = run('a = Actor()\ncue(50)\n  a.begin("long")\nend\na.begin("after")', {
     constructors,
     sleep,
   });
@@ -868,7 +941,7 @@ test("cue(N) proceeds after N ms even if the group is still running", async () =
 test("cue(-1) waits for every action in the group, like wait", async () => {
   const { events, gates, constructors } = fakeActor();
   const running = run(
-    'a = Actor()\ncue(-1) {\n  a.begin("one")\n  a.begin("two")\n}\na.begin("three")',
+    'a = Actor()\ncue(-1)\n  a.begin("one")\n  a.begin("two")\nend\na.begin("three")',
     { constructors },
   );
   await tick();
@@ -889,7 +962,7 @@ test("cue(-1) waits for every action in the group, like wait", async () => {
 
 test("cue(0) starts the group and moves on without waiting", async () => {
   const { events, gates, constructors } = fakeActor();
-  const running = run('a = Actor()\ncue(0) {\n  a.begin("one")\n}\na.begin("two")', {
+  const running = run('a = Actor()\ncue(0)\n  a.begin("one")\nend\na.begin("two")', {
     constructors,
   });
   await tick();
@@ -923,6 +996,28 @@ test("a one-statement cue still hands its time to the following lines", async ()
   gates.get("long")();
   await running;
   assert.equal(running.error, undefined);
+});
+
+test("a cue's csay and the next say queue up instead of erroring", async () => {
+  await inFakeDomAsync(async () => {
+    // A real stage is the point here: the box, not a stand-in, owns the click
+    // slot that the cue's line and the following say would fight over.
+    const { stage, element, dialogue } = domStage();
+    const text = dialogue.childNodes[3];
+    const running = run('cue csay("第一句")\nsay("第二句")', {
+      globals: createStageGlobals(stage),
+    });
+
+    await tick();
+    assert.equal(text.textContent, "第一句", "the cue line is up on its own");
+    element.dispatch("click");
+    await tick();
+    assert.equal(text.textContent, "第二句", "the next say waits for that click");
+
+    element.dispatch("click");
+    await running;
+    assert.equal(running.error, undefined, running.error?.message);
+  });
 });
 
 test("the links of a chain wait for each other", async () => {
@@ -960,7 +1055,7 @@ test("a cue's time is a length: the group is released when it is up", async () =
   const timers = [];
   const sleep = (ms) => new Promise((resolve) => timers.push({ ms, resolve }));
   const { events, gates, constructors } = fakeActor();
-  const running = run('a = Actor()\ncue(50) {\n  a.begin("long")\n}\na.begin("after")', {
+  const running = run('a = Actor()\ncue(50)\n  a.begin("long")\nend\na.begin("after")', {
     constructors,
     sleep,
   });
@@ -985,7 +1080,7 @@ test("a cue waits its time even after the group has finished", async () => {
   const timers = [];
   const sleep = (ms) => new Promise((resolve) => timers.push({ ms, resolve }));
   const { events, gates, constructors } = fakeActor();
-  const running = run('a = Actor()\ncue(50) {\n  a.begin("short")\n}\na.begin("after")', {
+  const running = run('a = Actor()\ncue(50)\n  a.begin("short")\nend\na.begin("after")', {
     constructors,
     sleep,
   });
@@ -1009,36 +1104,26 @@ test("a cue waits its time even after the group has finished", async () => {
   assert.equal(running.error, undefined);
 });
 
-test("a trailing wait's time outranks the time on the keyword", async () => {
-  const timers = [];
-  const sleep = (ms) => new Promise((resolve) => timers.push({ ms, resolve }));
-  const { events, gates, constructors } = fakeActor();
-  const running = run('a = Actor()\ncue(50) {\n  a.begin("one")\n} wait 70\na.begin("after")', {
-    constructors,
-    sleep,
-  });
-
-  await tick();
-  assert.deepEqual(events, ["start one"]);
-  assert.deepEqual(timers.map((timer) => timer.ms), [70], "the wait wins");
-
-  timers[0].resolve();
-  for (let i = 0; i < 50 && !events.includes("start after"); i++) {
-    await tick();
+test("a cue names its wait time once and only once", () => {
+  const sources = [
+    'cue(50)\n  a.b()\nend wait 70',
+    "cue @ 50\n  a.b()\nend wait 70",
+    "cue(50)\n  a.b()\nend wait",
+    "cue @ 50 a.b() wait 70",
+    "cue(50) a.b() wait 70",
+  ];
+  for (const source of sources) {
+    const parsed = parse(tokenize(source).tokens);
+    assert.ok(parsed.error, `expected an error for ${source}`);
+    assert.match(parsed.error.message, /只能写一次/);
   }
-  assert.deepEqual(events, ["start one", "start after"]);
-
-  gates.get("one")();
-  gates.get("after")();
-  await running;
-  assert.equal(running.error, undefined);
 });
 
-test("a bare wait still holds for the whole block, whatever time the keyword names", async () => {
+test("a bare wait is wait -1 and holds for the whole block", async () => {
   const timers = [];
   const sleep = (ms) => new Promise((resolve) => timers.push({ ms, resolve }));
   const { events, gates, constructors } = fakeActor();
-  const running = run('a = Actor()\ncue(50) {\n  a.begin("one")\n} wait\na.begin("after")', {
+  const running = run('a = Actor()\ncue\n  a.begin("one")\nend wait\na.begin("after")', {
     constructors,
     sleep,
   });
@@ -1060,7 +1145,7 @@ test("a preview does not pay a cue's time", async () => {
   const timers = [];
   const sleep = (ms) => new Promise((resolve) => timers.push({ ms, resolve }));
   const { constructors } = fakeActor();
-  const result = await run('a = Actor()\ncue(50) {\n  a.begin("one")\n}\na.note("after")', {
+  const result = await run('a = Actor()\ncue(50)\n  a.begin("one")\nend\na.note("after")', {
     constructors,
     sleep,
     preview: true,
@@ -1076,9 +1161,9 @@ test("cue without a block, or a block never closed, is rejected", () => {
   assert.ok(bare.error, "expected an error");
   assert.match(bare.error.message, /语句块/);
 
-  const open = parse(tokenize("cue {\n  a.b()\n").tokens);
+  const open = parse(tokenize("cue\n  a.b()\n").tokens);
   assert.ok(open.error, "expected an error");
-  assert.match(open.error.message, /\}/);
+  assert.match(open.error.message, /end/);
 });
 
 test("a function declaration parses into a statement of its own", () => {
@@ -1109,7 +1194,7 @@ test("what a function declaration can get wrong is reported", () => {
     ["func () {\n}", /函数名/],
     // A keyword here would bind a name no line could ever call, since the
     // statement parser reads the keyword first.
-    ["func cue() {\n}", /关键字/],
+    ["func cue()\nend", /关键字/],
     ["func title(1) {\n}", /参数/],
     ["func title(a, a) {\n}", /重复/],
     ["func title(a {\n}", /逗号/],
@@ -1373,7 +1458,7 @@ test("a branch that starts something waits for it like any other statement", asy
 test("an if inside a cue still belongs to the block's wait", async () => {
   const { events, gates, constructors } = fakeActor();
   const running = run(
-    'a = Actor()\ncue {\n  if true {\n    a.begin("fade")\n  }\n} wait\na.note("after")',
+    'a = Actor()\ncue\n  if true {\n    a.begin("fade")\n  }\nend wait\na.note("after")',
     { constructors },
   );
 
@@ -1916,7 +2001,7 @@ test("a wait inside a cue is one of the things the block waits for", async () =>
   const { events, gates, constructors } = fakeActor();
   const started = Date.now();
   const running = run(
-    'a = Actor()\ncue {\n  wait 30\n  a.begin("after pause")\n} wait\na.note("done")',
+    'a = Actor()\ncue\n  wait 30\n  a.begin("after pause")\nend wait\na.note("done")',
     { constructors },
   );
 
@@ -1941,7 +2026,7 @@ test("a wait inside a cue is one of the things the block waits for", async () =>
 test("a wait with nothing after it says how it is written", async () => {
   const result = await run("wait\nx = 1");
   assert.ok(result.error);
-  assert.match(result.error.message, /要么跟在语句块的 \} 后面，要么写成 wait 毫秒数/);
+  assert.match(result.error.message, /要么跟在 cue 的 end 或行内语句后面，要么写成 wait 毫秒数/);
 });
 
 // --- text comparison ---
@@ -2275,7 +2360,7 @@ test("a node inside a call or a cue block is not a place to save", async () => {
   const nodes = [];
   const { constructors } = fakeActor();
   await run(
-    'a = Actor()\nfunc f() {\n  a.note("in f")\n}\nf()\ncue {\n  a.note("in cue")\n}',
+    'a = Actor()\nfunc f() {\n  a.note("in f")\n}\nf()\ncue\n  a.note("in cue")\nend',
     {
       constructors,
       onNode: (node) => nodes.push({ path: node.path, canSave: node.canSave }),
@@ -2466,11 +2551,11 @@ test("an empty script runs without drawing anything", async () => {
   assert.deepEqual(stage.shown, []);
 });
 
-test("player.skip：起点就快进，走到标记处才转成常速演出", async () => {
+test("player.start：起点就快进，走到标记处才转成常速演出", async () => {
   const seen = [];
   let live = false;
   const result = await run(
-    ['say("前")', "wait 500", "# debug::com.player.skip", 'say("后")'].join("\n"),
+    ['say("前")', "wait 500", "# debug::com.player.start", 'say("后")'].join("\n"),
     {
       globals: { stage: { kind: "Stage", say: (text) => seen.push({ text, live }) } },
       sleep: () => Promise.resolve(),
@@ -2490,7 +2575,7 @@ test("player.skip：起点就快进，走到标记处才转成常速演出", asy
   ]);
 });
 
-test("player.skip：标记没走到时报告 skipMissed，因为整段都没有显示", async () => {
+test("player.start：标记没走到时报告 skipMissed，因为整段都没有显示", async () => {
   const result = await run('say("a")', {
     globals: { stage: { kind: "Stage", say: () => {} } },
     fastForward: true,
@@ -2502,7 +2587,7 @@ test("player.skip：标记没走到时报告 skipMissed，因为整段都没有�
 test("不开快进时，标记之前的语句照常是「正在演出」", async () => {
   const seen = [];
   let live = true;
-  const result = await run(['say("前")', "# debug::com.player.skip", 'say("后")'].join("\n"), {
+  const result = await run(['say("前")', "# debug::com.player.start", 'say("后")'].join("\n"), {
     globals: { stage: { kind: "Stage", say: (text) => seen.push({ text, live }) } },
     onLive: () => {
       live = true;
@@ -2547,8 +2632,8 @@ test("scanDebugCommands 按行报告调试命令，认不出的名字也报出�
       'say("a")',
       "  # debug::com.export.start",
       "# 说明",
-      "// # debug::com.player.skip",
-      "# debug::com.player.skip",
+      "// # debug::com.player.start",
+      "# debug::com.player.start",
     ].join("\n"),
   );
   assert.deepEqual(
@@ -2556,9 +2641,33 @@ test("scanDebugCommands 按行报告调试命令，认不出的名字也报出�
     [
       ["debug::com.export.start", 2, true],
       ["说明", 3, false],
-      ["debug::com.player.skip", 5, true],
+      ["debug::com.player.start", 5, true],
     ],
   );
+});
+
+test("速度指令走到时才上报，后面的值覆盖前面的", async () => {
+  const seen = [];
+  const result = await run(
+    [
+      'say("a")',
+      "# debug::com.audio.voiceSpeed=0.5",
+      'say("b")',
+      "# debug::com.audio.voiceSpeed=2",
+      'say("c")',
+    ].join("\n"),
+    {
+      globals: { stage: { kind: "Stage", say: (text) => seen.push(text) } },
+      onDebug: (statement) => {
+        if (statement.target === "audio") {
+          seen.push(`${statement.command}:${statement.value}`);
+        }
+        return null;
+      },
+    },
+  );
+  assert.equal(result.error, undefined);
+  assert.deepEqual(seen, ["a", "voiceSpeed:0.5", "b", "voiceSpeed:2", "c"]);
 });
 
 test("a blank script is reported as empty, not as a missing value on line 1", async () => {
@@ -2646,7 +2755,7 @@ test("a statement that takes time is over before the next begins", async () => {
 
 test("statements in a cue block start at the same moment", async () => {
   const { events, gates, constructors } = fakeActor();
-  const running = run('a = Actor()\ncue {\n  a.begin("one")\n  a.begin("two")\n}', {
+  const running = run('a = Actor()\ncue\n  a.begin("one")\n  a.begin("two")\nend', {
     constructors,
   });
 
@@ -2665,7 +2774,7 @@ test("statements in a cue block start at the same moment", async () => {
 
 test("without wait, a block does not hold back what follows it", async () => {
   const { events, gates, constructors } = fakeActor();
-  const running = run('a = Actor()\ncue {\n  a.begin("one")\n}\na.begin("two")', {
+  const running = run('a = Actor()\ncue\n  a.begin("one")\nend\na.begin("two")', {
     constructors,
   });
 
@@ -2685,7 +2794,7 @@ test("without wait, a block does not hold back what follows it", async () => {
 test("wait holds what follows a block back until the block is over", async () => {
   const { events, gates, constructors } = fakeActor();
   const running = run(
-    'a = Actor()\ncue {\n  a.begin("one")\n  a.begin("two")\n} wait\na.begin("three")',
+    'a = Actor()\ncue\n  a.begin("one")\n  a.begin("two")\nend wait\na.begin("three")',
     { constructors },
   );
 
@@ -2717,13 +2826,13 @@ test("wait holds what follows a block back until the block is over", async () =>
 });
 
 test("wait has to sit on the closing line to belong to a block", async () => {
-  const attached = await run("cue {\n  a = 1\n} wait");
+  const attached = await run("cue\n  a = 1\nend wait");
   assert.equal(attached.error, undefined);
 
   // A newline separates statements everywhere else in the language, so a
   // `wait` on a line of its own is read as a statement of its own — where it
   // names nothing at all.
-  const apart = await run("cue {\n  a = 1\n}\nwait");
+  const apart = await run("cue\n  a = 1\nend\nwait");
   assert.ok(apart.error, "expected an error");
   assert.match(apart.error.message, /wait/);
   assert.equal(apart.error.line, 4);
@@ -2841,9 +2950,9 @@ test("a function called in a block belongs to the block's wait", async () => {
       '  a.begin("one")',
       '  a.begin("two")',
       "}",
-      "cue {",
+      "cue",
       "  pair()",
-      "} wait",
+      "end wait",
       'a.begin("three")',
     ].join("\n"),
     { constructors },
@@ -3461,7 +3570,8 @@ test("named arguments may come in any order", async () => {
   assert.equal(result.error, undefined);
   assert.equal(stage.moves[0].x, -100, "x places outright");
   assert.equal(stage.turns[0].scale, 2);
-  assert.equal(stage.fades.at(-1).value, 0.5);
+  // enable 自带 show：入场时透明度归到 1，构造时的 alpha 不再留在画面上。
+  assert.equal(stage.fades.at(-1).value, 1);
 });
 
 test("a method takes its arguments by name too", async () => {
@@ -4172,24 +4282,69 @@ test("a sample lays text out the same way without waiting on a click", () => {
   assert.equal(text.textContent, "换一句");
 });
 
-test("a click ends the wait, and a line already up refuses a second", async () => {
-  const { box, element, speaker, text } = inFakeDom(() => dialogueBox());
+test("a second line waits its turn instead of colliding with the first", async () => {
+  await inFakeDomAsync(async () => {
+    const { box, element, speaker, text } = dialogueBox();
 
-  const spoken = box.line("艾拉", "你来了。");
-  assert.equal(speaker.hidden, false);
-  assert.equal(speaker.textContent, "艾拉");
-  assert.equal(text.textContent, "你来了。");
-  assert.equal(box.isWaiting(), true);
+    const spoken = box.line("艾拉", "你来了。");
+    assert.equal(speaker.hidden, false);
+    assert.equal(speaker.textContent, "艾拉");
+    assert.equal(text.textContent, "你来了。");
+    assert.equal(box.isWaiting(), true);
 
-  // Two lines at once is a `cue` block speaking twice: refused rather than
-  // resolved to one of them, since neither reading is what a writer meant.
-  assert.throws(() => box.line("艾拉", "又一句"), /并发台词/);
+    // A `cue` can leave this line up while the script reaches the next one.
+    // The second line shares the one click slot and waits for the first to go.
+    const second = box.line("艾拉", "又一句");
+    assert.equal(text.textContent, "你来了。", "the queued line is not drawn early");
 
-  element.dispatch("click");
-  assert.equal(box.isWaiting(), false);
-  await spoken;
-  // A click with nothing up is a no-op, not a second settling.
-  assert.equal(box.settle(), false);
+    element.dispatch("click");
+    assert.equal(await spoken, undefined);
+    await tick();
+    assert.equal(text.textContent, "又一句");
+    assert.equal(box.isWaiting(), true);
+
+    element.dispatch("click");
+    await second;
+    assert.equal(box.isWaiting(), false);
+    assert.equal(box.settle(), false, "a click with nothing up is a no-op");
+  });
+});
+
+test("a queued csay appends to the line that actually ended", async () => {
+  await inFakeDomAsync(async () => {
+    const { box, element, text } = dialogueBox();
+
+    const first = box.line("小明", "你好，");
+    const second = box.appendLine("小明", "我是小明");
+    element.dispatch("click");
+    await first;
+    await tick();
+    assert.equal(text.textContent, "你好，我是小明");
+    assert.equal(box.getHistory().at(-1).text, "你好，我是小明");
+
+    element.dispatch("click");
+    await second;
+  });
+});
+
+test("clearing the stage drops lines that are still queued", async () => {
+  await inFakeDomAsync(async () => {
+    const { box, element, text } = dialogueBox();
+
+    const first = box.line("艾拉", "你来了。");
+    const second = box.line("艾拉", "又一句");
+    box.clear();
+    await Promise.all([first, second]);
+    await tick();
+    assert.equal(text.textContent, "", "no queued line is drawn after a clear");
+    assert.equal(box.isWaiting(), false);
+
+    // The next run can show a line at once; the queue was reset with the clear.
+    const next = box.line("艾拉", "新的一场");
+    assert.equal(text.textContent, "新的一场");
+    element.dispatch("click");
+    await next;
+  });
 });
 
 test("clearing the stage ends a line that is still up", async () => {
@@ -4673,13 +4828,13 @@ test("a cue starts every point pull, not only the last one", async () => {
   const result = await run(
     [
       'ch = Character("hero.png")',
-      "cue {",
+      "cue",
       "  ch.transform.upright(300, 300, 1000)",
       "  ch.transform.upleft(-300, 300, 1000)",
       "  ch.transform.up(0, 300, 1000)",
       "  ch.transform.downleft(100, 0, 1000)",
       "  ch.transform.downright(-100, 0, 1000)",
-      "}",
+      "end",
     ].join("\n"),
     { constructors: createStageObjects(stage) },
   );
@@ -5091,23 +5246,27 @@ test("the script's alpha calls reach the stage, and survive a rebuild", async ()
 
   const hero = objects.Character(["happy.png"], context);
   hero.enable();
+  // enable 自带的 show 排在图片就绪之后，要等这次入场跑完再核对后续的淡变。
+  await Promise.all(context.pending.splice(0));
   hero.alpha(0.3, 250);
   hero.hide(100);
   hero.show(100);
 
   assert.deepEqual(stage.fades, [
+    { target: "hero", value: 0, time: 0 },
     { target: "hero", value: 1, time: 0 },
     { target: "hero", value: 0.3, time: 250 },
     { target: "hero", value: 0, time: 100 },
     { target: "hero", value: 1, time: 100 },
   ]);
 
-  // A character faded out stays faded out when its expression is changed: the
-  // swap must not bring back a character the scene had hidden.
+  // 重新赋值同一个变量时，旧的淡出仍留在画面上；但新的 enable 自带 show，
+  // 会把这个角色重新带入画面。
   hero.alpha(0);
   const rebuilt = objects.Character(["sad.png"], context);
   rebuilt.enable();
-  assert.equal(stage.fades.at(-1).value, 0, "the rebuilt character keeps the opacity");
+  await Promise.all(context.pending.splice(0));
+  assert.equal(stage.fades.at(-1).value, 1, "enable 自带 show，重建后重新入场");
 });
 
 test("an alpha that is not a number is reported", () => {

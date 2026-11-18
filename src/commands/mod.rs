@@ -573,6 +573,44 @@ pub fn reveal_path(path: String, state: State<'_, ProjectState>) -> Result<(), S
     show_in_file_manager(&target)
 }
 
+/// 在系统文件管理器里打开项目根目录。
+///
+/// 资源区标题旁的那个按钮用它：备份、提交、打包给别人都在编辑器之外发生，
+/// 而项目目录只有后端知道——前端只写得出项目内的相对路径。
+#[tauri::command(async)]
+pub fn open_project_folder(state: State<'_, ProjectState>) -> Result<(), String> {
+    let root = state.root()?;
+    open_directory(Path::new(&root))
+}
+
+/// 让文件管理器打开 `dir` 本身，而不是在里面选中某一项。
+#[cfg(target_os = "windows")]
+fn open_directory(dir: &Path) -> Result<(), String> {
+    std::process::Command::new("explorer.exe")
+        .arg(dir)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("无法打开文件管理器：{e}"))
+}
+
+#[cfg(target_os = "macos")]
+fn open_directory(dir: &Path) -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg(dir)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("无法打开文件管理器：{e}"))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_directory(dir: &Path) -> Result<(), String> {
+    std::process::Command::new("xdg-open")
+        .arg(dir)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("无法打开文件管理器：{e}"))
+}
+
 /// 让文件管理器把 `path` 标成选中项。
 ///
 /// Windows 上 `explorer /select,` 的退出码是 1（成功也如此），所以只看能否

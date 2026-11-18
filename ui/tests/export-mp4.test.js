@@ -340,6 +340,40 @@ test("调试范围：只有 start 时一路导到末尾", async () => {
   assert.equal(result.frames, 31);
 });
 
+test("调试范围：长前导段跳事件快进，不逐帧空转", async () => {
+  const { invoke } = recorder();
+  const clock = createVirtualClock();
+  const range = { startMs: null, endMs: null, hasStart: true };
+  let flushes = 0;
+  const statuses = [];
+  const exporter = createExporter({
+    invoke,
+    clock,
+    frameSource: () => ({}),
+    encoder: fakeEncoder(),
+    VideoFrameClass: FakeFrame,
+    // 每次让出都计数：逐帧空转 60 秒要 1800 次，跳事件只要几十次。
+    flush: async () => {
+      flushes += 1;
+    },
+    range: () => range,
+    onStatus: (text) => statuses.push(text),
+    performance: async () => {
+      for (let index = 0; index < 60; index += 1) {
+        await clock.wait(1000);
+      }
+      range.startMs = clock.now();
+      await clock.wait(500);
+      range.endMs = clock.now();
+    },
+  });
+
+  const result = await exporter.start();
+  assert.equal(result.frames, 16);
+  assert.ok(flushes < 200, `让出次数 ${flushes} 说明前导段还在逐帧空转`);
+  assert.deepEqual(statuses.slice(0, 2), ["正在跳到导出起点…", "正在渲染…"]);
+});
+
 test("a failed performance aborts instead of silently finishing the movie", async () => {
   const { calls, invoke } = recorder();
   const exporter = createExporter({

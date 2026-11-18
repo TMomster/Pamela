@@ -143,12 +143,34 @@ test("the toggle collapses the panel without losing the dragged width", () => {
 
   toggle.dispatch("click");
   assert.ok(panel.classes.has("is-collapsed"));
-  assert.equal(splitter.hidden, true);
+  // 分隔条留在原地：收起之后，那条边线是唯一还能把面板叫回来的东西。
+  assert.equal(splitter.hidden, false);
+  assert.ok(splitter.classes.has("is-collapsed"));
   assert.equal(toggle["aria-expanded"], "false");
   assert.equal(written.get(VAR), "320px");
 
   toggle.dispatch("click");
   assert.equal(panel.classes.has("is-collapsed"), false);
-  assert.equal(splitter.hidden, false);
+  assert.equal(splitter.classes.has("is-collapsed"), false);
   assert.equal(toggle["aria-expanded"], "true");
+  assert.equal(written.get(VAR), "320px");
+});
+
+test("a folded panel has no edge to drag, and its button does not start one", () => {
+  const { written, windowListeners } = stubBrowser({ width: 300 });
+  const panel = fakeElement();
+  const splitter = fakeElement();
+  const toggle = fakeElement();
+  setupSplitter(panel, splitter, toggle);
+
+  toggle.dispatch("click");
+  assert.ok(panel.classes.has("is-collapsed"));
+
+  splitter.dispatch("pointerdown", { button: 0, clientX: 200, preventDefault() {} });
+  assert.equal(splitter.classes.has("is-dragging"), false);
+  assert.equal(windowListeners.has("pointermove"), false);
+
+  const preventDefault = () => {};
+  splitter.dispatch("keydown", { key: "ArrowRight", preventDefault });
+  assert.equal(written.get(VAR), "300px");
 });

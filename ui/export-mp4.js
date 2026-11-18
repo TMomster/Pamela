@@ -117,6 +117,8 @@ export async function createVideoEncoder({ config, output, error, VideoEncoderCl
  * @param {() => number} [options.startTime]
  *   从哪个时刻开始取帧（毫秒）。脚本里 `# debug::com.export.start` 之前的部分
  *   只推进时钟：那些帧不进成片，但演出必须照常走完，起点处的画面才对。
+ * @param {() => void} [options.onSkip]
+ *   第一次进入前导段时调用一次，宿主可据此提示用户正在快进到起点。
  * @returns {Promise<number>} 渲染帧数
  */
 export function createFrameLoop({
@@ -128,20 +130,30 @@ export function createFrameLoop({
   flush = flushMicrotasks,
   maxFrames = DEFAULT_EXPORT.maxFrames,
   startTime = () => 0,
+  onSkip = null,
 }) {
   return async function loop() {
     let frames = 0;
+    let skipped = false;
     for (;;) {
       if (frames >= maxFrames) {
         throw new Error(`导出帧数超过上限 ${maxFrames}`);
       }
       const t = clock.now();
-      // 起点之前：不取帧、不编码，只让时钟往前走。
+      // 起点之前：不取帧、不编码，只把演出推到起点。
       if (t < (Number(startTime()) || 0)) {
         if (shouldStop({ frames, t })) {
           return frames;
         }
-        clock.tick();
+        if (!skipped) {
+          skipped = true;
+          onSkip?.();
+        }
+        // 前导段的帧不进成片：能跳事件就跳，别逐帧 setTimeout 空转几十秒。
+        // 时钟等待的是真实 I/O（配音解码等）时 advance 返回 false，仍让出一轮。
+        if (typeof clock.advance !== "function" || !clock.advance()) {
+          clock.tick();
+        }
         await flush();
         continue;
       }
@@ -344,6 +356,7 @@ export function createExporter({
       // 成片的时间戳从第一张真正入片的画面算起：范围起点之前那段不进文件，
       // 所以第 0 帧必须从 0 开始，否则播放器会看到一段空白。
       let origin = null;
+      let skipping = false;
 
       const loop = createFrameLoop({
         clock,
@@ -352,8 +365,16 @@ export function createExporter({
         flush,
         maxFrames: config.maxFrames,
         startTime,
+        onSkip: () => {
+          skipping = true;
+          onStatus("正在跳到导出起点…");
+        },
         shouldStop,
         onFrame: (source, t, index) => {
+          if (skipping) {
+            skipping = false;
+            onStatus("正在渲染…");
+          }
           if (origin === null) {
             origin = t;
           }

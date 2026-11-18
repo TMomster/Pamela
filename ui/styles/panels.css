@@ -67,7 +67,7 @@
 
 /* --- collapsing the resource panel --- */
 
-/* 收起是一段动画：面板从当前宽度收成一条窄条，再倒回来。宽度有过渡，所以分隔条
+/* 收起是一段动画：面板从当前宽度收成零宽，再倒回来。宽度有过渡，所以分隔条
    拖动时必须把它关掉——面板不能慢半拍地跟着指针走。 */
 .panel--resources {
   transition: width 200ms cubic-bezier(0.22, 0.68, 0.24, 1);
@@ -78,11 +78,12 @@ body.is-resizing .panel--resources {
   transition: none;
 }
 
-/* Collapsed, the panel narrows to a strip rather than to nothing: the button
-   that folded it has to stay reachable to unfold it. The width comes from the
-   class, so the splitter's figure is still there the moment it comes back. */
+/* Collapsed, the panel folds away to nothing: no strip is left over, because the
+   button that folded it no longer lives in the panel — it rides on the edge, and
+   that edge is what stays behind at the left of the window. The width comes from
+   the class, so the splitter's figure is still there the moment it comes back. */
 .panel--resources.is-collapsed {
-  width: 34px;
+  width: 0;
 }
 
 .panel--resources.is-collapsed .panel__header {
@@ -98,11 +99,7 @@ body.is-resizing .panel--resources {
 /* The tree dissolves instead of blinking out: it fades while the panel narrows,
    and fades back in while it widens. `visibility` is what finally takes it out
    of the way — hidden elements keep their box, so the panel's layout never
-   jumps — and it waits for the fade to finish before it does.
-
-   The title and the count are gone with `display: none` instead: they sit in
-   the header next to the fold button, and a hidden-but-present box would push
-   that button out of the 34px strip. */
+   jumps — and it waits for the fade to finish before it does. */
 .panel--resources .panel__body {
   opacity: 1;
   transition: opacity 140ms ease, visibility 0s linear 0s;
@@ -115,35 +112,9 @@ body.is-resizing .panel--resources {
   transition: opacity 140ms ease, visibility 0s linear 140ms;
 }
 
-.panel__toggle {
-  flex: 0 0 auto;
-  width: 20px;
-  height: 20px;
-  display: grid;
-  place-items: center;
-  padding: 0;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--pamela-text-muted);
-  font: inherit;
-  line-height: 1;
-  cursor: default;
-}
-
-.panel__toggle .icon {
-  width: 13px;
-  height: 13px;
-}
-
-.panel__toggle:hover {
-  background: var(--pamela-hover);
-  color: var(--pamela-text);
-}
-
-/* A header button that acts on the panel's contents rather than on the panel
-   itself. Same footprint as the collapse button so the two read as one row of
-   controls, but it is not the thing that folds the panel away. */
+/* A header button that acts on the panel's contents — or on the project behind
+   them — rather than on the panel itself. Same footprint for both, so they read
+   as one row of controls, and neither is the thing that folds the panel away. */
 .panel__button {
   flex: 0 0 auto;
   width: 20px;
@@ -316,15 +287,32 @@ body.is-resizing .panel--resources {
 
 /* --- splitter --- */
 
+/* The edge is a little wider than the line it draws, and borrows three pixels
+   from either neighbour: the pointer needs somewhere to stop before the line
+   answers, and the button that folds the panel lives on this edge. */
 .splitter {
   flex: 0 0 auto;
-  width: 5px;
-  margin-left: -2px;
-  margin-right: -2px;
+  width: 7px;
+  margin-left: -3px;
+  margin-right: -3px;
   position: relative;
   z-index: 1;
   background: transparent;
   cursor: col-resize;
+  /* 收起时边线跟着面板一起滑到窗口最左侧，而不是一步跳过去。 */
+  transition: margin-left 200ms cubic-bezier(0.22, 0.68, 0.24, 1);
+}
+
+body.is-resizing .splitter {
+  transition: none;
+}
+
+/* Folded away, there is no width to drag: the edge keeps its place at the very
+   left of the window — that is where the panel comes back from — and the cursor
+   says it has one job instead of two. */
+.splitter.is-collapsed {
+  margin-left: 0;
+  cursor: default;
 }
 
 .splitter::before {
@@ -332,22 +320,79 @@ body.is-resizing .panel--resources {
   position: absolute;
   top: 0;
   bottom: 0;
-  left: 2px;
+  left: 3px;
   width: 1px;
   background: var(--pamela-border);
-  transition: background-color 120ms ease, width 120ms ease;
+  transition: background-color 120ms ease, width 120ms ease, left 120ms ease;
 }
 
+/* 指针停在边线上（或键盘落在上面）时，边线变蓝加粗。 */
 .splitter:hover::before,
 .splitter:focus-visible::before,
 .splitter.is-dragging::before {
-  left: 1px;
+  left: 2px;
   width: 3px;
   background: var(--pamela-accent);
 }
 
 .splitter:focus-visible {
   outline: none;
+}
+
+/* 收起 / 展开的按钮骑在边线上，中间高度，平时不出现。它可以是空的：脚本会把
+   两个方向的雪佛龙按状态换上去。 */
+.splitter__toggle {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 2;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--pamela-accent);
+  border-radius: 4px;
+  background: var(--pamela-surface);
+  color: var(--pamela-text);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease, background-color 120ms ease,
+    left 200ms cubic-bezier(0.22, 0.68, 0.24, 1);
+}
+
+.splitter__toggle .icon {
+  width: 11px;
+  height: 11px;
+}
+
+/* 只有指针停在边线上，或键盘把它走到，按钮才浮出来；按钮盖住的那几个像素平时
+   不接指针，树与编辑区照常可点。 */
+.splitter:hover .splitter__toggle,
+.splitter:focus-visible .splitter__toggle,
+.splitter__toggle:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.splitter__toggle:hover {
+  background: var(--pamela-hover);
+}
+
+/* 拖动时按钮藏起来：它正好骑在指针追着的那条边线上，松手的那一下会被当成点击，
+   面板就自己收起来了。 */
+.splitter.is-dragging .splitter__toggle {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* 收起之后边线就在窗口左缘：按钮整个挪到边线右边，不然一半会落在窗口外。 */
+.splitter.is-collapsed .splitter__toggle {
+  left: 13px;
 }
 
 /* --- editor --- */
@@ -359,6 +404,34 @@ body.is-resizing .panel--resources {
   min-width: 0;
   overflow: hidden;
   background: var(--pamela-black);
+}
+
+.editor__panes {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+.editor__pane {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.editor__splitter {
+  flex: 0 0 4px;
+  background: var(--pamela-border);
+  cursor: col-resize;
+}
+
+.editor__splitter:hover,
+.editor__splitter:focus-visible {
+  background: var(--pamela-accent);
+  outline: none;
 }
 
 .tabs {
@@ -416,6 +489,22 @@ body.is-resizing .panel--resources {
   background: var(--pamela-dirty);
 }
 
+/* A pinned tab carries a small chevron pointing at the side it docks to. */
+.tab--pin-left .tab__label::after,
+.tab--pin-right .tab__label::after {
+  margin-left: 4px;
+  color: var(--pamela-accent);
+  font-size: 10px;
+}
+
+.tab--pin-left .tab__label::after {
+  content: "◀";
+}
+
+.tab--pin-right .tab__label::after {
+  content: "▶";
+}
+
 .tab__label {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -464,7 +553,9 @@ body.is-resizing .panel--resources {
   position: relative;
   flex: 1 1 auto;
   min-height: 0;
-  overflow: auto;
+  /* Each surface owns its own scrolling (textarea, reader, editors). Letting
+     this frame scroll too stacks a second scrollbar over the split divider. */
+  overflow: hidden;
 }
 
 .editor__empty {
@@ -599,7 +690,7 @@ body.is-resizing .panel--resources {
 .tok-builtin { color: #82aaff; }
 .tok-ident { color: var(--pamela-text); }
 .tok-operator { color: #89ddff; }
-/* 一行调试命令（`# debug::com.player.skip`）：不演出、不参与运算，只是给作者和
+/* 一行调试命令（`# debug::com.player.start`）：不演出、不参与运算，只是给作者和
    播放器看的标记，所以用一个醒目但不抢戏的暖色，与注释区分开。 */
 .tok-debug { color: #ffcb6b; font-weight: 600; }
 

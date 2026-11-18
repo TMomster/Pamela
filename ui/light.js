@@ -873,6 +873,26 @@ function paintFootprint(ctx, light, geometry, size, masked = true) {
   return true;
 }
 
+/** A hair of overlap hides the antialiased seam between two mesh triangles. */
+const SILHOUETTE_BLEED = 0.5;
+
+/** Grows a triangle about its own centre, in canvas pixels. */
+function grownTriangle(points) {
+  const middle = {
+    x: (points[0].x + points[1].x + points[2].x) / 3,
+    y: (points[0].y + points[1].y + points[2].y) / 3,
+  };
+  return points.map((point) => {
+    const dx = point.x - middle.x;
+    const dy = point.y - middle.y;
+    const length = Math.hypot(dx, dy) || 1;
+    return {
+      x: point.x + (dx / length) * SILHOUETTE_BLEED,
+      y: point.y + (dy / length) * SILHOUETTE_BLEED,
+    };
+  });
+}
+
 /**
  * Draws one object's shape into `ctx` as a flat silhouette.
  *
@@ -880,14 +900,18 @@ function paintFootprint(ctx, light, geometry, size, masked = true) {
  * "non-transparent edge" a rim glow has to follow — and a plain rectangle
  * otherwise, which is what a text or a backdrop can offer.
  *
- * An object that has been turned out of the stage plane arrives with
+ * A free-transformed image arrives with `mesh`: the eight pieces its picture is
+ * really drawn through, already mapped into this canvas. That is the same
+ * geometry the stage and the export paint, so a pulled edge moves the rim glow
+ * with it. An object turned out of the stage plane without a mesh arrives with
  * `corners`: the four points its rectangle now covers, in stage coordinates.
  * Those are a projection rather than an affine image of the rectangle, so the
  * shape is drawn as the same two clipped triangles the export uses — the rim
  * glow then follows the picture's real outline instead of a squashed box.
  *
  * @param {object} ctx
- * @param {object} object `{ bitmap, x, y, w, h, rotation, scale, scaleX, scaleY, corners? }`
+ * @param {object} object
+ *   `{ bitmap, x, y, w, h, rotation, scale, scaleX, scaleY, rect?, mesh?, corners? }`
  * @param {{ width: number, height: number }} size
  * @param {number} scale Canvas pixels per logical pixel.
  */
@@ -901,6 +925,25 @@ export function drawSilhouette(ctx, object, size, scale) {
     x: size.width / 2 + point.x * scale,
     y: size.height / 2 - point.y * scale,
   });
+  if (object.mesh?.pieces?.length) {
+    for (const piece of object.mesh.pieces) {
+      if (!piece.target || !Number.isFinite(piece.a)) {
+        continue;
+      }
+      const triangle = grownTriangle(piece.target);
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(triangle[0].x, triangle[0].y);
+      ctx.lineTo(triangle[1].x, triangle[1].y);
+      ctx.lineTo(triangle[2].x, triangle[2].y);
+      ctx.closePath();
+      ctx.clip();
+      ctx.transform(piece.a, piece.b, piece.c, piece.d, piece.e, piece.f);
+      paintSilhouette(ctx, object, w, h);
+      ctx.restore();
+    }
+    return;
+  }
   if (object.corners) {
     const source = [
       { x: -w / 2, y: -h / 2 },
@@ -949,6 +992,9 @@ function silhouetteBox(object, size, scale) {
   const h = object.h ?? 0;
   if (!(w > 0) || !(h > 0)) {
     return null;
+  }
+  if (object.mesh?.bounds) {
+    return object.mesh.bounds;
   }
   if (object.corners) {
     const xs = object.corners.map((point) => size.width / 2 + point.x * scale);
@@ -1212,7 +1258,7 @@ function paintLitObjects(ctx, light, { size, scale, objects, scratch, halo = nul
       continue;
     }
     // 光只是擦到边角就不必画了：贴图乘色的开销比一层光晕大得多。
-    const weight = lightRectWeight(light, object);
+    const weight = lightRectWeight(light, object.rect ?? object);
     // 灯在对象后面时正面照不到：越靠里越暗，700 之后全黑，只剩泛光的轮廓。
     const face = lightFaceAt(light, object.z);
     const alpha = clamp(weight * gain * face, 0, 1);
@@ -1283,7 +1329,7 @@ function paintRim(ctx, light, { size, scale, objects, scratch, geometry, halo = 
     }
     // 只按「光场扫没扫到它」分档，不拿光晕本身当遮罩：光晕是渐变的，拿它乘
     // 一遍，贴着轮廓的那一圈本来就只剩五六成 alpha，乘完基本看不见了。
-    const reach = clamp(lightRectWeight(light, object) / 0.35, 0, 1);
+    const reach = clamp(lightRectWeight(light, object.rect ?? object) / 0.35, 0, 1);
     if (!(reach > 0.01)) {
       continue;
     }

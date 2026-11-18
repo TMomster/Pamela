@@ -81,6 +81,22 @@
           <header class="panel__header">
             <span class="panel__title" id="resource-title">资源</span>
             <span class="panel__meta" id="resource-meta"></span>
+            <!-- Hands the project folder itself to the system file manager:
+                 backups, a commit, or a colleague are all outside the editor,
+                 and the folder is a path only the back end knows. -->
+            <button
+              class="panel__button"
+              id="resource-reveal"
+              type="button"
+              title="在资源管理器打开"
+              aria-label="在资源管理器打开项目文件夹"
+            >
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path
+                  d="M6 14l1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"
+                />
+              </svg>
+            </button>
             <!-- Re-reads the project from disk and redraws the tree in place.
                  A file added, renamed or deleted outside the editor is not
                  noticed until something rescans, and the menu's 重新扫描 is a
@@ -97,20 +113,6 @@
                 <path d="M21 3v6h-6" />
               </svg>
             </button>
-            <!-- Collapses the panel to a strip; the same button brings it
-                 back. Width itself stays on the splitter. -->
-            <button
-              class="panel__toggle"
-              id="resource-toggle"
-              type="button"
-              title="折叠资源栏"
-              aria-label="折叠资源栏"
-              aria-expanded="true"
-            >
-              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                <path d="m11 17-5-5 5-5M18 17l-5-5 5-5" />
-              </svg>
-            </button>
           </header>
 
           <div class="panel__body" id="resource-body">
@@ -120,6 +122,8 @@
           </div>
         </aside>
 
+        <!-- 边线兼两用：拖动它改变面板宽度，指针停在上面时中间浮出一个
+             「收起 / 展开」按钮——收起之后它就是窗口最左侧的那道边线。 -->
         <div
           class="splitter"
           id="resource-splitter"
@@ -127,12 +131,27 @@
           aria-orientation="vertical"
           aria-label="调整资源栏宽度"
           tabindex="0"
-        ></div>
+        >
+          <button
+            class="splitter__toggle"
+            id="resource-toggle"
+            type="button"
+            title="折叠资源栏"
+            aria-label="折叠资源栏"
+            aria-expanded="true"
+          >
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="m11 17-5-5 5-5M18 17l-5-5 5-5" />
+            </svg>
+          </button>
+        </div>
 
         <main class="editor" aria-label="编辑区">
-          <div class="tabs" id="editor-tabs" role="tablist"></div>
+          <div class="editor__panes" id="editor-panes">
+            <section class="editor__pane" id="editor-pane-primary" aria-label="主编辑区">
+              <div class="tabs" id="editor-tabs" role="tablist"></div>
 
-          <div class="editor__surface">
+              <div class="editor__surface" id="editor-surface">
             <div class="editor__empty" id="editor-empty">
               <p class="editor__empty-title">编辑区</p>
               <p class="editor__empty-hint">从左侧资源栏打开一个 .pe 脚本</p>
@@ -321,7 +340,9 @@
                  construction — the article is rendered from strings compiled
                  into the application, and nothing here is editable. Built by
                  `ui/reader.js`. -->
-            <div class="reader" id="reader-view" tabindex="0" hidden></div>
+              <div class="reader" id="reader-view" tabindex="0" hidden></div>
+              </div>
+            </section>
           </div>
         </main>
       </div>

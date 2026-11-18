@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createAudioRecorder } from "../export-audio.js";
-import { createVirtualClock } from "../export-clock.js";
+import { createVirtualClock, flushTasks } from "../export-clock.js";
 import { stateAt, createTimeline } from "../export-timeline.js";
 import {
   createRecordGlobals,
@@ -13,6 +13,7 @@ import {
   DEFAULT_RECORDING,
   holdFor,
 } from "../export-stage.js";
+import { methodName, run } from "../pamela.js";
 import { PAMELA_INTRO_MS } from "../pamela-intro.js";
 
 function harness() {
@@ -34,7 +35,7 @@ test("the recording globals have the shape the interpreter expects", () => {
   const built = globals(context);
   assert.equal(built.stage.kind, "Stage");
   assert.equal(built.dialog.kind, "Dialog");
-  for (const name of ["Background", "Character", "Text", "Audio", "Effect", "Video"]) {
+  for (const name of ["Background", "Character", "Text", "Audio", "Effect", "Video", "Light", "Camera"]) {
     assert.equal(typeof built.stage[name], "function", name);
   }
   assert.equal(typeof built.dialog.say, "function");
@@ -70,6 +71,28 @@ test("Effect objects write particle state instead of a picture layer", () => {
   assert.equal(state.visible, true);
   assert.equal(state.playing, true);
   assert.equal(state.epoch, 1);
+});
+
+test("Camera objects record one active view and tween their numbers", () => {
+  const { clock, timeline, globals } = harness();
+  const { stage } = globals({ pending: [] });
+
+  const wide = stage.Camera(0, 0, -2000, 60);
+  wide.enable();
+  clock.tickMs(1000);
+  const tele = stage.Camera(0, 0, -2000, 30);
+  tele.enable();
+  clock.tickMs(1000);
+
+  assert.equal(stateAt(timeline, 500)["camera:camera-1"].active, true);
+  assert.equal(stateAt(timeline, 1500)["camera:camera-1"].active, false);
+  assert.equal(stateAt(timeline, 1500)["camera:camera-2"].active, true);
+  assert.equal(stateAt(timeline, 1500)["camera:camera-2"].fov, 30);
+
+  tele.fov(50, 400);
+  assert.equal(stateAt(timeline, 2000)["camera:camera-2"].fov, 30);
+  assert.equal(stateAt(timeline, 2200)["camera:camera-2"].fov, 40);
+  assert.equal(stateAt(timeline, 2400)["camera:camera-2"].fov, 50);
 });
 
 test("crood is a per-object timeline switch, hidden by default", () => {
@@ -156,27 +179,24 @@ test("stage.autoVoice 开时，无配音的 say 登记合成效果音；显式�
 });
 
 test("stage.autoVoice 的整数参数控制播放速度，超界会被夹到 1~10", () => {
-  const clock = createVirtualClock();
-  const timeline = createTimeline();
-  const recorder = createAudioRecorder({ clock });
-  const { stage } = createRecordGlobals({ clock, timeline }, { audioRecorder: recorder })(
-    { pending: [] },
-  );
+  // 台词现在按顺序排队，一句还没说完时下一句不会开场；这里每种速度单独建一套
+  // 录制舞台，专心看 autoVoice 的取值。
+  const say = (speed, text) => {
+    const clock = createVirtualClock();
+    const timeline = createTimeline();
+    const recorder = createAudioRecorder({ clock });
+    const { stage } = createRecordGlobals({ clock, timeline }, { audioRecorder: recorder })(
+      { pending: [] },
+    );
+    stage.autoVoice(speed);
+    stage.say(text);
+    return recorder;
+  };
 
-  stage.autoVoice(6);
-  stage.say("按六次每秒");
-  assert.equal(recorder.events[0].speed, 6);
-
-  recorder.events.length = 0;
-  stage.autoVoice(99);
-  stage.say("超界夹到十");
-  assert.equal(recorder.events[0].speed, 10, "上限 10");
-
-  recorder.events.length = 0;
-  stage.autoVoice(0);
-  stage.say("零表示关闭");
+  assert.equal(say(6, "按六次每秒").events[0].speed, 6);
+  assert.equal(say(99, "超界夹到十").events[0].speed, 10, "上限 10");
   assert.equal(
-    recorder.events.some((event) => event.kind === "synth"),
+    say(0, "零表示关闭").events.some((event) => event.kind === "synth"),
     false,
     "autoVoice(0) 关闭自动配音",
   );
@@ -381,6 +401,94 @@ test("filter and tint transitions interpolate on the timeline", () => {
   assert.equal(done.tint_r, 20);
 });
 
+test("文字的滤镜也写进时间线，enable 前后都保留并逐帧插值", () => {
+  const { clock, timeline, globals } = harness();
+
+  const early = globals({ pending: [], assignee: "early" }).stage.Text("早", 0, 0, 48, "#ffffff");
+  early.blur(3);
+  early.enable();
+  assert.equal(stateAt(timeline, 0)["text:early"].look_blur, 3, "enable 前的滤镜不丢");
+
+  const title = globals({ pending: [], assignee: "title" }).stage.Text("字", 0, 0, 48, "#ffffff");
+  title.enable();
+  title.blur(8, 1000).saturate(0.2, 1000);
+  assert.equal(stateAt(timeline, 0)["text:title"].look_blur, 0, "带时长的滤镜从原样起步");
+
+  clock.tickMs(500);
+  const mid = stateAt(timeline, 500)["text:title"];
+  assert.equal(mid.look_blur, 4, "模糊在 1 秒里从 0 到 8");
+  assert.equal(mid.look_saturate, 0.6, "饱和度从 1 到 0.2");
+
+  clock.tickMs(500);
+  const done = stateAt(timeline, 1000)["text:title"];
+  assert.equal(done.look_blur, 8);
+  assert.equal(done.look_saturate, 0.2);
+});
+
+test("文字也能用 flush 复原四个滤镜", () => {
+  const { timeline, globals } = harness();
+  const { stage } = globals({ pending: [], assignee: "title" });
+  const title = stage.Text("字", 0, 0, 48, "#ffffff");
+  title.blur(4).brightness(0.5).contrast(2).saturate(0);
+  title.flush(methodName("blur"), methodName("saturate"));
+
+  const state = stateAt(timeline, 0)["text:title"];
+  assert.equal(state.look_blur, 0);
+  assert.equal(state.look_saturate, 1, "饱和度的原样是 1");
+  assert.equal(state.look_brightness, 0.5, "未点名的滤镜留着");
+
+  title.flush();
+  const all = stateAt(timeline, 0)["text:title"];
+  assert.equal(all.look_brightness, 1);
+  assert.equal(all.look_contrast, 1);
+});
+
+test("flush 在录制里复原效果，给时间就成为一次过渡", () => {
+  const { timeline, globals } = harness();
+  const { stage } = globals({ pending: [] });
+
+  const hero = stage.Character("hero.png");
+  hero.scale(2).blur(4).rgb(20, 0, 0).move(300, -200).alpha(0.5);
+  hero.flush(
+    methodName("scale"),
+    methodName("blur"),
+    methodName("rgb"),
+    methodName("move"),
+    methodName("alpha"),
+    1000,
+  );
+
+  const mid = stateAt(timeline, 500)["character:character"];
+  assert.equal(mid.scale, 1.5, "倍率 2 → 1 的一半");
+  assert.equal(mid.look_blur, 2);
+  assert.equal(mid.tint_r, 10);
+  assert.equal(mid.x, 150);
+  assert.equal(mid.opacity, 0.75);
+
+  const done = stateAt(timeline, 1000)["character:character"];
+  assert.equal(done.scale, 1);
+  assert.equal(done.look_blur, 0);
+  assert.equal(done.tint_r, 0);
+  assert.equal(done.x, 0);
+  assert.equal(done.opacity, 1);
+});
+
+test("flush 不写名字时这一层的全部效果一起复原，而且立刻生效", () => {
+  const { timeline, globals } = harness();
+  const { stage } = globals({ pending: [] });
+
+  const hero = stage.Character("hero.png");
+  hero.scale(2).rotate(45).blur(4).rgb(20, 10, 0).alpha(0.5);
+  hero.flush();
+
+  const state = stateAt(timeline, 0)["character:character"];
+  assert.equal(state.scale, 1);
+  assert.equal(state.rotation, 0);
+  assert.equal(state.look_blur, 0);
+  assert.equal(state.tint_r, 0);
+  assert.equal(state.opacity, 1);
+});
+
 test("角色 hide().enable().show(ms) 在录制里渐显而非瞬现", () => {
   // 复现自动播放 / 导出时立绘直接显示、没有渐变的问题：录制路径曾把 show/hide
   // 别名成 enable/disable，而后者只切 visible、不碰透明度，于是 hide→enable→show
@@ -398,6 +506,21 @@ test("角色 hide().enable().show(ms) 在录制里渐显而非瞬现", () => {
   assert.ok(mid.opacity > 0 && mid.opacity < 1, "中途处于半透明渐变中");
 
   assert.equal(stateAt(timeline, 1500)[target].opacity, 1, "到时完全显示");
+});
+
+test("文字 enable(ms) 在录制里从透明渐显，而不是瞬间出现", () => {
+  const { timeline, globals } = harness();
+  const context = { pending: [], assignee: "title" };
+  const title = globals(context).stage.Text("字", 0, 0, 48, "#ffffff");
+  title.enable(2000);
+
+  const target = "text:title";
+  assert.equal(stateAt(timeline, 0)[target].visible, true, "enable 后可见");
+  assert.equal(stateAt(timeline, 0)[target].opacity, 0, "带时长时从透明上台");
+  const mid = stateAt(timeline, 1000)[target];
+  assert.ok(mid.opacity > 0 && mid.opacity < 1, "中途处于半透明渐变中");
+  assert.equal(stateAt(timeline, 2000)[target].opacity, 1, "到时完全显示");
+  assert.equal(context.pending.length, 1, "解释器要等这次渐显跑完");
 });
 
 test("Audio objects go to the recorder instead of the timeline", () => {
@@ -486,12 +609,14 @@ test("没有颜色标记的台词分段里也没有颜色", () => {
   clock.tickMs(900);
 });
 
-test("彩色台词之后的一句普通台词不会沿用上一句的颜色", () => {
+test("彩色台词之后的一句普通台词不会沿用上一句的颜色", async () => {
   const clock = createVirtualClock();
   const timeline = createTimeline();
   const recording = createRecordingStage({ clock, timeline });
   recording.sayLine("旁白", "{红}红字{/}", { time: 900 });
   clock.tickMs(900);
+  // 上一句的停留刚到期，队列在微任务里放开；下一句才轮到。
+  await flushTasks();
   recording.sayLine("旁白", "普通台词", { time: 900 });
 
   const next = stateAt(timeline, 900);
@@ -554,13 +679,14 @@ test("sayLine 文本比语音长时以文本为准再加 800ms", async () => {
   assert.equal(clock.pending(), 0);
 });
 
-test("csayLine 接在上一句后面，已显示字数从上一句接着数", () => {
+test("csayLine 接在上一句后面，已显示字数从上一句接着数", async () => {
   const clock = createVirtualClock();
   const timeline = createTimeline();
   const recording = createRecordingStage({ clock, timeline });
 
   recording.sayLine("旁白", "你好，", { time: 300 });
   clock.tickMs(300);
+  await flushTasks();
   recording.csayLine("旁白", "我是小明", { time: 400 });
 
   const at = stateAt(timeline, 300);
@@ -643,6 +769,54 @@ test("a character keeps its speaker name for say()", () => {
   hero.name("小明").enable().say("我来了", 0);
   assert.equal(stateAt(timeline, 0).dialogue.name, "小明");
   assert.equal(stateAt(timeline, 0).dialogue.text, "我来了");
+});
+
+test("a character's say/csay read a trailing voice track by type, not by position", async () => {
+  const clock = createVirtualClock();
+  const timeline = createTimeline();
+  const recorder = createAudioRecorder({ clock });
+  const { stage } = createRecordGlobals({ clock, timeline }, { audioRecorder: recorder })(
+    { pending: [], assignee: "hero" },
+  );
+  const hero = stage.Character("hero.png");
+  hero.name("小明").enable();
+
+  hero.say("我来了", "Audio/vo.wav");
+  assert.deepEqual(recorder.events.map((e) => e.kind), ["play"], "第二个实参是字符串时按配音名读取");
+  assert.equal(stateAt(timeline, 0).dialogue.name, "小明");
+  assert.equal(stateAt(timeline, 0).dialogue.text, "我来了");
+
+  // 第一句按三字给 900ms 停留；走完并放开队列，第二句才轮到。
+  clock.tickMs(900);
+  await flushTasks();
+  recorder.events.length = 0;
+  hero.csay("接着说", 800, "Audio/vo.wav");
+  assert.deepEqual(recorder.events.map((e) => e.kind), ["play"], "csay 与数字时间混写也能识别配音");
+  assert.equal(stateAt(timeline, 900).dialogue.text, "我来了接着说", "csay 接在上一句后面");
+
+  clock.tickMs(800);
+  await flushTasks();
+  recorder.events.length = 0;
+  hero.say("最后一句", "Audio/vo.wav", 800);
+  assert.deepEqual(recorder.events.map((e) => e.kind), ["play"], "配音写在时间前面同样成立");
+});
+
+test("a character's explicit voice suppresses autoVoice in export", () => {
+  const clock = createVirtualClock();
+  const timeline = createTimeline();
+  const recorder = createAudioRecorder({ clock });
+  const { stage } = createRecordGlobals({ clock, timeline }, { audioRecorder: recorder })(
+    { pending: [], assignee: "hero" },
+  );
+  stage.autoVoice(true);
+  const hero = stage.Character("hero.png");
+
+  hero.say("我来了", "Audio/vo.wav");
+  assert.deepEqual(
+    recorder.events.map((e) => e.kind),
+    ["play"],
+    "显式配音优先，不再登记自动合成音效",
+  );
 });
 
 test("a free transform records one tween per control point and accumulates", () => {
@@ -775,6 +949,23 @@ test("the ambient brightness is a state of its own", () => {
   assert.equal(stateAt(timeline, 0).ambient.value, 0.35);
 });
 
+test("a timed ambient change is a tween and holds the script", () => {
+  const { clock, timeline } = harness();
+  const stage = createRecordingStage({ clock, timeline });
+
+  stage.setAmbient(0.4);
+  const waiting = stage.setAmbient(1, 1000);
+  assert.ok(waiting && typeof waiting.then === "function", "剧本要等这段过渡走完");
+  assert.equal(stateAt(timeline, 0).ambient.value, 0.4, "从当前亮度起步");
+  assert.equal(stateAt(timeline, 500).ambient.value, 0.7, "中途按线性插值");
+  assert.equal(stateAt(timeline, 1000).ambient.value, 1);
+
+  // 还在走的时候又调一次：新的一段从画面上正在显示的值起步，而不是旧目标。
+  clock.tickMs(500);
+  stage.setAmbient(0.2, 500);
+  assert.ok(Math.abs(stateAt(timeline, 750).ambient.value - 0.45) < 1e-9);
+});
+
 test("perspective and guideline are stage-wide states, recorded like ambient", () => {
   const { clock, timeline } = harness();
   const stage = createRecordingStage({ clock, timeline });
@@ -809,6 +1000,188 @@ test("a backdrop is recorded one step deeper than a character", () => {
     "背景比角色更远，导出时先画",
   );
   assert.equal(stateAt(timeline, 0).background.z, 1);
+});
+
+test("the interpreter drives a Text look in the movie with Chinese aliases and @ time", async () => {
+  const clock = createVirtualClock();
+  const timeline = createTimeline();
+  const globals = createRecordGlobals({ clock, timeline });
+
+  // 一边让虚拟时钟往前走，一边推进解释器，直到整段演出结束。
+  let done = false;
+  const running = Promise.resolve()
+    .then(() =>
+      run(['title = Text("字")', "title.enable()", "title.模糊(8) @ 1000"].join("\n"), {
+        globals,
+        sleep: (ms) => clock.wait(ms),
+      }),
+    )
+    .then(
+      (value) => {
+        done = true;
+        return value;
+      },
+      (error) => {
+        done = true;
+        throw error;
+      },
+    );
+  running.catch(() => {});
+  await flushTasks();
+  for (let step = 0; step < 200 && !done; step += 1) {
+    clock.tick();
+    await flushTasks();
+  }
+  const result = await running;
+  assert.equal(result.error, undefined, result.error?.message);
+
+  // 中文「模糊」与 `@ 1000` 都落到时间线：从 0 在 1 秒里插到 8。
+  const doneState = stateAt(timeline, 1000)["text:title"];
+  assert.equal(doneState.look_blur, 8);
+  assert.equal(stateAt(timeline, 500)["text:title"].look_blur, 4);
+});
+
+
+test("del works on a recording object and takes the layer off the timeline", async () => {
+  const clock = createVirtualClock();
+  const timeline = createTimeline();
+  const globals = createRecordGlobals({ clock, timeline });
+
+  let done = false;
+  const running = Promise.resolve()
+    .then(() =>
+      run(['hero = Character("hero.png")', "hero.enable()", "wait 500", "del hero"].join("\n"), {
+        globals,
+        sleep: (ms) => clock.wait(ms),
+      }),
+    )
+    .then(
+      (value) => {
+        done = true;
+        return value;
+      },
+      (error) => {
+        done = true;
+        throw error;
+      },
+    );
+  running.catch(() => {});
+  await flushTasks();
+  for (let step = 0; step < 200 && !done; step += 1) {
+    clock.tick();
+    await flushTasks();
+  }
+  const result = await running;
+  assert.equal(result.error, undefined, result.error?.message);
+
+  assert.equal(stateAt(timeline, 0)["character:hero"].visible, true);
+  assert.equal(stateAt(timeline, 499)["character:hero"].visible, true);
+  assert.equal(
+    stateAt(timeline, 500)["character:hero"].visible,
+    false,
+    "del 在当下把这一层收掉",
+  );
+});
+
+test("a cue's line holds the next say back, as the player's dialogue queue does", async () => {
+  const clock = createVirtualClock();
+  const timeline = createTimeline();
+  const globals = createRecordGlobals({ clock, timeline });
+
+  // 第一句 10 个字：1150ms 的停留；后面的 say 写在 800ms 处，必须等到 1150ms
+  // 才上屏，否则成片里两句会挤在一起（预览里是排队等前一句的）。
+  const program = [
+    'cue say("一二三四五六七八九十")',
+    "wait 800",
+    'say("后一句")',
+  ].join("\n");
+
+  let done = false;
+  const running = Promise.resolve()
+    .then(() => run(program, { globals, sleep: (ms) => clock.wait(ms) }))
+    .then(
+      (value) => {
+        done = true;
+        return value;
+      },
+      (error) => {
+        done = true;
+        throw error;
+      },
+    );
+  running.catch(() => {});
+  await flushTasks();
+  // 按 10ms 步进：等待落在整毫秒上，方便断言台词换屏的时刻。
+  for (let step = 0; step < 500 && !done; step += 1) {
+    clock.tickMs(10);
+    await flushTasks();
+  }
+  const result = await running;
+  assert.equal(result.error, undefined, result.error?.message);
+
+  assert.equal(stateAt(timeline, 0).dialogue.text, "一二三四五六七八九十");
+  assert.equal(
+    stateAt(timeline, 1149).dialogue.text,
+    "一二三四五六七八九十",
+    "前一句还没走完，后一句不能上屏",
+  );
+  assert.equal(stateAt(timeline, 1150).dialogue.text, "后一句");
+  assert.equal(clock.now(), 1150 + 900, "后一句自己还要走 900ms 的停留");
+});
+
+test("Audio's enable / disable are recorded as play / stop, as on the stage", async () => {
+  const clock = createVirtualClock();
+  const timeline = createTimeline();
+  const audioRecorder = createAudioRecorder({ clock });
+  const globals = createRecordGlobals({ clock, timeline, audioRecorder });
+
+  const result = await run(
+    ['eff = Audio("Audio/咻.wav")', "eff.enable()", "eff.disable()"].join("\n"),
+    { globals, sleep: (ms) => clock.wait(ms) },
+  );
+  assert.equal(result.error, undefined, result.error?.message);
+  assert.deepEqual(
+    audioRecorder.events.map((event) => event.kind),
+    ["play", "stop"],
+    "声音的统一开关就是带淡变的 play / stop",
+  );
+});
+
+test("key() stays a method: the timeline target name no longer shadows it", () => {
+  const { globals } = harness();
+  const built = globals({ assignee: "bg", pending: [] });
+  const bg = built.stage.Background("bg.png");
+
+  assert.equal(typeof bg.key, "function", "`key` 不能被时间线的目标名盖成字符串");
+  assert.doesNotThrow(() => bg.key("key-bg.keyframes"));
+});
+
+test("画面轨把移动转给视频画面，不吞调用", () => {
+  const { timeline, globals } = harness();
+  const built = globals({ assignee: "vid", pending: [] });
+  const vid = built.stage.Video("v.mp4");
+  vid.enable();
+  vid.media.moveTo(120, -40, 100);
+
+  const state = stateAt(timeline, 0)["video:vid"];
+  assert.equal(state.x, 120);
+  assert.equal(state.y, -40);
+  assert.equal(state.z, 100);
+});
+
+test("文字的「颜色」解析成 color，而不是图片的 hex", async () => {
+  const { timeline, globals } = harness();
+  const result = await run(
+    ['title = Text("字")', 'title.颜色("#ff0000")'].join("\n"),
+    { globals },
+  );
+  assert.equal(result.error, undefined, result.error?.message);
+
+  const state = stateAt(timeline, 0)["text:title"];
+  // 走 `color` 才写文字颜色；若错走 `hex`，改的会是调色（`tint_*`）而不是这里。
+  assert.equal(state.color, "#ff0000");
+  assert.equal(state.color_r, 255);
+  assert.equal(state.tint_r, undefined, "文字没有调色，不该走 hex");
 });
 
 test("h / v are recorded exactly like x / y", () => {

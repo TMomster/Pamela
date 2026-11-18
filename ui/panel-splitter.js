@@ -20,7 +20,7 @@ export function currentResourceWidth() {
  *
  * @param {HTMLElement} panel
  * @param {HTMLElement} splitter
- * @param {HTMLElement | null} [toggle] The collapse button in the panel header.
+ * @param {HTMLElement | null} [toggle] The fold button riding on the splitter.
  * @returns {(width: number) => number} Applies a width and answers the clamped value.
  */
 export function setupSplitter(panel, splitter, toggle = null) {
@@ -36,13 +36,14 @@ export function setupSplitter(panel, splitter, toggle = null) {
 
   // Collapsing is a class on the panel rather than a write to the width
   // variable, so the width the splitter dragged out is still there — unchanged
-  // — the moment the panel comes back. The splitter itself goes away while
-  // collapsed: there is nothing to resize down a strip.
+  // — the moment the panel comes back. The panel folds away to nothing, and the
+  // splitter stays where it is: once folded, that edge is the only thing left to
+  // hover, and hovering it is how the panel is asked back.
   let collapsed = false;
   const setCollapsed = (next) => {
     collapsed = next;
     panel.classList.toggle("is-collapsed", collapsed);
-    splitter.hidden = collapsed;
+    splitter.classList.toggle("is-collapsed", collapsed);
     if (!toggle) {
       return;
     }
@@ -53,6 +54,9 @@ export function setupSplitter(panel, splitter, toggle = null) {
     toggle.setAttribute("aria-expanded", String(!collapsed));
   };
   toggle?.addEventListener("click", () => setCollapsed(!collapsed));
+  // The button rides on the splitter, so the press that folds the panel must not
+  // also read as the start of a drag.
+  toggle?.addEventListener("pointerdown", (event) => event.stopPropagation());
 
   let drag = null;
 
@@ -78,6 +82,11 @@ export function setupSplitter(panel, splitter, toggle = null) {
     if (event.button !== 0) {
       return;
     }
+    // Folded away, there is no edge to drag to a new width: the panel comes back
+    // through the button, at the width it was folded from.
+    if (collapsed) {
+      return;
+    }
     event.preventDefault();
     drag = { startWidth: currentResourceWidth(), startX: event.clientX };
     splitter.classList.add("is-dragging");
@@ -90,7 +99,7 @@ export function setupSplitter(panel, splitter, toggle = null) {
   const STEP = 16;
   splitter.addEventListener("keydown", (event) => {
     const step = { ArrowLeft: -STEP, ArrowRight: STEP }[event.key];
-    if (step === undefined) {
+    if (step === undefined || collapsed) {
       return;
     }
     event.preventDefault();

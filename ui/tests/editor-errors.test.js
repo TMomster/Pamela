@@ -12,12 +12,12 @@ test("a clean script has no error to mark", () => {
   assert.equal(syntaxErrorIn(null), null);
 });
 
-test("an unclosed block is reported on its own line", () => {
-  const error = syntaxErrorIn("cue(50) {");
+test("an unclosed cue block is reported on its own line", () => {
+  const error = syntaxErrorIn("cue(50)\n  a.b()");
   assert.ok(error, "a broken script must be detected");
   assert.equal(error.line, 1);
   assert.equal(error.column, 1);
-  assert.match(error.message, /语句块/);
+  assert.match(error.message, /end/);
 });
 
 test("a missing value is reported on the line where it is missing", () => {

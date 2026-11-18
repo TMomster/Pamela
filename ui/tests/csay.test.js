@@ -60,6 +60,17 @@ function inFakeDom(body) {
   }
 }
 
+/** Keeps the fake document in place while a case awaits a queued line. */
+async function inFakeDomAsync(body) {
+  const previous = globalThis.document;
+  globalThis.document = { createElement: () => fakeElement() };
+  try {
+    return await body();
+  } finally {
+    globalThis.document = previous;
+  }
+}
+
 /**
  * A box over the fake DOM, answering the parts a test looks at.
  *
@@ -172,12 +183,21 @@ test("续说：time 只按新增的字数算", async () => {
   });
 });
 
-test("续说：上一句还在等点击时，不能同时再续一句", () => {
-  inFakeDom(() => {
+test("续说：上一句还在等点击时，下一句排队而不是报错", async () => {
+  await inFakeDomAsync(async () => {
     const b = box({ typewriter: "off" });
-    b.line(null, "先说一句").catch(() => {});
-    assert.throws(() => b.appendLine(null, "再说一句"), /不能同时显示两句台词/);
+    const first = b.line(null, "先说一句");
+    const second = b.appendLine(null, "再说一句");
+    assert.equal(b.text.textContent, "先说一句");
+
     b.settle();
+    await first;
+    await wait();
+    assert.equal(b.text.textContent, "先说一句再说一句");
+
+    b.settle();
+    await second;
+    assert.equal(b.isWaiting(), false);
   });
 });
 

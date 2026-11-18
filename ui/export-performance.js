@@ -185,8 +185,11 @@ export function createExportPerformance({
     // 起点未定的那一段要不要取帧，它第一帧就要答案。
     const program = isMpePath(path) ? transpile(source) : source;
     const range = session.range ?? (session.range = { startMs: null, endMs: null });
-    const marks = scanDebugCommands(program).filter((command) => command.target === "export");
+    const commands = scanDebugCommands(program);
+    const marks = commands.filter((command) => command.target === "export");
     range.hasStart = marks.some((command) => command.command === "start");
+    const autoShowSetting = commands.find((command) => command.command === "autoShow");
+    const autoModify = commands.some((command) => command.command === "autoModify");
     await preload(source);
     const result = await run(program, {
       globals: createRecordGlobals(session, { config }),
@@ -196,11 +199,23 @@ export function createExportPerformance({
       readScene,
       useStyle: async () => {},
       source: path,
+      // 与播放器一致：开关在解析后、演出前生效。
+      autoShow: autoShowSetting ? autoShowSetting.autoShow : true,
+      autoModify,
       stopped: () => Boolean(isStopped?.()),
       onNode: () => {},
       onChoice: () => {},
       onLive: () => {},
       onDebug: (statement) => {
+        // 速度指令走到才生效，后面的 play / say 事件自带当时的基础倍率。
+        if (statement.target === "audio") {
+          if (statement.command === "voiceSpeed") {
+            session.audioRecorder?.setVoiceSpeed(statement.value);
+          } else if (statement.command === "audioSpeed") {
+            session.audioRecorder?.setAudioSpeed(statement.value);
+          }
+          return null;
+        }
         if (statement.target !== "export") {
           return null;
         }

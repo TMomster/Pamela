@@ -14,7 +14,13 @@ import { addSet, addTween } from "./export-timeline.js";
 import { addTint, clampChannel, parseHex, toHex, withLook } from "./filters.js";
 import { antialiasAmount } from "./antialias.js";
 import { normalizeLight } from "./light.js";
-import { PARAM_SPECS, boolArg } from "./pamela.js";
+import {
+  BUILTIN_ALIASES,
+  OBJECT_DESTROY,
+  PARAM_SPECS,
+  boolArg,
+  methodNameOf,
+} from "./pamela.js";
 import { richTextRuns, stripRichText } from "./rich-text.js";
 import { PAMELA_INTRO_MS } from "./pamela-intro.js";
 import {
@@ -22,8 +28,13 @@ import {
   AUTOVOICE_MIN_SPEED,
   AUTOVOICE_MAX_SPEED,
 } from "./voice-effect.js";
-import { BACKGROUND_DEPTH, clampDepth } from "./space.js";
-import { createStageGlobals } from "./stage.js";
+import {
+  BACKGROUND_DEPTH,
+  DEFAULT_CAMERA,
+  clampDepth,
+  normalizeCamera,
+} from "./space.js";
+import { createStageGlobals, sayTiming } from "./stage.js";
 import {
   spriteFrameAt,
   spriteFrameRate,
@@ -46,6 +57,44 @@ export const SAY_TAIL_MS = 800;
 const TRANSFORM_POINTS = [
   "upleft", "upright", "downleft", "downright",
   "up", "down", "left", "right",
+];
+
+/**
+ * `flush` 能复原的效果，按不写名字时的顺序排列。
+ *
+ * 与 `stage.js` 的 `imageFlushers` 是同一套名字与同一套顺序 —— 舞台改的是元素
+ * 样式，导出改的是时间线，名字与默认值必须是同一个，成片才与预览一致。
+ */
+const FLUSH_PLACE = [
+  "move", "moveTo", "x", "h", "xTo", "hTo", "y", "v", "yTo", "vTo", "z", "zTo",
+  "rotate", "rotateTo", "rotateH", "rotateHTo", "rotateV", "rotateVTo",
+  "scale", "scaleTo",
+];
+/** 四个滤镜回到原样时的值：模糊 0，其余三个 1。 */
+const FLUSH_LOOK = { blur: 0, brightness: 1, contrast: 1, saturate: 1 };
+/** 调色：三个名字落回同一个「没有偏移」。 */
+const FLUSH_TINT = ["rgb", "rgbTo", "hex"];
+/** 文字自己的三项。 */
+const FLUSH_TEXT = ["color", "font", "weight"];
+/** 文字的默认颜色，与舞台的 `DEFAULT_TEXT_COLOR` 相同。 */
+const DEFAULT_TEXT_COLOR = "#ffffff";
+/** 不写名字时复原的清单，按顺序：每个状态只写一次，别名不重复。 */
+const FLUSH_ALL_PLACE = ["move", "rotate", "rotateH", "rotateV", "scale", "alpha"];
+
+/**
+ * `v.media` 上与画面同名的方法。
+ *
+ * 与播放器 `video.js` 的 `mediaMethods` 是同一组名字：画面轨就是这条视频的
+ * 画面，导出把调用转给同一层记录。少了这一步，`v.media.moveTo(…)` 在成片里
+ * 会悄悄什么都不做，而预览时是有效的。
+ */
+const VIDEO_MEDIA_PICTURE_METHODS = [
+  "show", "hide", "alpha",
+  "move", "moveTo", "z", "x", "y", "zTo", "xTo", "yTo",
+  "h", "v", "hTo", "vTo",
+  "rotate", "rotateTo", "rotateH", "rotateHTo", "rotateV", "rotateVTo",
+  "scale", "scaleTo",
+  "blur", "brightness", "contrast", "saturate", "rgb", "rgbTo", "hex",
 ];
 
 function asText(value) {
@@ -101,9 +150,58 @@ export function createRecordingStage({
   // `stage.autoPause(ms)` 在导出里落在这里：语音/文字较晚者之后要停多久，
   // 默认与真舞台一致（800ms），0 表示说完就切。
   let autoPauseMs = SAY_TAIL_MS;
+  // 环境亮度：目标值，以及上一段过渡的起点 / 时刻 / 时长。下一次过渡要从
+  // 画面上正在显示的那个值起步，而不是从上一段的目标值（可能还没走到）。
+  let ambientValue = 1;
+  let ambientFrom = 1;
+  let ambientStart = 0;
+  let ambientSpan = 0;
+  const ambientShown = () => {
+    if (!(ambientSpan > 0)) {
+      return ambientValue;
+    }
+    const progress = Math.min(1, Math.max(0, (clock.now() - ambientStart) / ambientSpan));
+    return ambientFrom + (ambientValue - ambientFrom) * progress;
+  };
   // 对话框上现在是哪一句（原文与已显示字数）：`csay` 要在它后面接着写。
   let shownRaw = "";
   let shownRevealed = 0;
+  // 台词与 `stage.click` 共用一条队列。`cue` 里的台词不等待，脚本后文走到
+  // 下一句时前一句可能还在停留；播放器的 `dialog.js` 按调用顺序排队，后一句
+  // 等到前一句走完才上屏。导出若直接按当前时刻写时间线，两句就会挤在一起：
+  // 后一句提前把文字换掉，前一句的配音却还在放。这里排同一条队。
+  let lineTail = Promise.resolve();
+  let queuedLines = 0;
+
+  /**
+   * 把一段要等的时间排到上一句之后：队列空时立即开始，否则等前一段走完再
+   * 开始 —— 而且要在真正轮到自己时才读时钟与上一句留下的文字，`csay` 接的
+   * 正是「排到它时」框里的内容；`cue` 里同时发出的几句也因此按顺序登场。
+   */
+  function serializeLine(start) {
+    if (queuedLines === 0) {
+      queuedLines = 1;
+      let started;
+      try {
+        started = start();
+      } catch (error) {
+        // 同步失败（时间参数非法之类）不能把队列永久占住。
+        queuedLines = 0;
+        throw error;
+      }
+      lineTail = Promise.resolve(started).catch(() => {}).finally(() => {
+        queuedLines = Math.max(0, queuedLines - 1);
+      });
+      return started;
+    }
+    queuedLines += 1;
+    const next = lineTail.then(start, start);
+    lineTail = next.catch(() => {}).finally(() => {
+      queuedLines = Math.max(0, queuedLines - 1);
+    });
+    return next;
+  }
+
   /**
    * 一句台词的录制，`say` 与 `csay` 共用。
    *
@@ -182,11 +280,11 @@ export function createRecordingStage({
     },
     /** @returns {Promise<void>|undefined} 被 push 进 context.pending 的等待。 */
     sayLine(name, line, timing = {}) {
-      return writeLine(name, line, timing, false);
+      return serializeLine(() => writeLine(name, line, timing, false));
     },
     /** `csay`：同一句接着上一句写，只把新接上的一段算成这一句。 */
     csayLine(name, line, timing = {}) {
-      return writeLine(name, line, timing, true);
+      return serializeLine(() => writeLine(name, line, timing, true));
     },
     choose(labels) {
       return Promise.resolve(labels?.length ? 0 : -1);
@@ -194,9 +292,11 @@ export function createRecordingStage({
     /**
      * `stage.click(time)` / `stage.auto(time)` 在导出里只占时长：没有玩家来
      * 点击，点击标记也不进画面，唯一的职责是把虚拟时钟推进 `time` 毫秒。
+     * 与台词排同一条队，和播放器一样：前一句还挂着时，这个等待从那一句
+     * 走完之后才开始计时。
      */
     clickWait(time) {
-      return clock.wait(Number(time) || 0);
+      return serializeLine(() => clock.wait(Number(time) || 0));
     },
     /**
      * `stage.autoVoice(speed)` 在导出里落在这里：开启后，没有显式配音的
@@ -246,14 +346,29 @@ export function createRecordingStage({
      * 环境亮度：整块画面的乘算亮度，0–2，1 为原样。
      *
      * 它进时间线而不是进某个对象：渲染后端在画每一层时把它乘进滤镜里，
-     * 所以它和舞台上一样只作用于画面，不作用于对话盒。
+     * 所以它和舞台上一样只作用于画面，不作用于对话盒。给了 `time` 就登记
+     * 一段线性过渡，成片里看到的是从当前亮度走到新值。
+     *
+     * @returns {Promise<void> | undefined} 有时间时让剧本等这段过渡走完。
      */
-    setAmbient(value) {
+    setAmbient(value, time) {
       const next = Math.min(2, Math.max(0, Number(value)));
       if (!Number.isFinite(next)) {
         throw new Error("环境亮度需要 0–2 的数字");
       }
-      addSet(timeline, clock.now(), "ambient", { value: next });
+      const at = clock.now();
+      const span = Number(time) > 0 ? Number(time) : 0;
+      const from = ambientShown();
+      ambientValue = next;
+      ambientFrom = from;
+      ambientStart = at;
+      ambientSpan = span;
+      if (span > 0) {
+        addTween(timeline, at, at + span, "ambient", "value", from, next);
+        return clock.wait(span);
+      }
+      addSet(timeline, at, "ambient", { value: next });
+      return undefined;
     },
     /**
      * 空间透视：默认关。开关进时间线而不是进某个对象 —— 它改的是整幅画面的
@@ -279,7 +394,13 @@ export function createRecordingStage({
   };
 }
 
-/** 未知方法一律返回自身，让脚本里的链式调用不会炸；但不伪装成 thenable。 */
+/**
+ * 录制对象的链式代理，但不伪装成 thenable。
+ *
+ * 只有录进去的方法才答得出来：脚本写错名字，或者这个类型本来没有那个方法时，
+ * 答案和播放器一样是「没有这个方法」，而不是一个默默吞掉调用的空实现。否则
+ * 导出能跑、播放器报错的脚本会把两边真正的差异掩盖过去。
+ */
 function chainable(record) {
   let proxy;
   proxy = new Proxy(record, {
@@ -293,7 +414,15 @@ function chainable(record) {
       if (prop === "then" || prop === "toJSON" || prop === "valueOf") {
         return undefined;
       }
-      return () => proxy;
+      // 中文方法名落到同名英文方法上：解释器拿到对象自带的方法后就不再查别名
+      // 表，`模糊(8) @ 1000` 会因找不到参数表而报「没有时间参数」。
+      const english = BUILTIN_ALIASES.get(prop);
+      if (english !== undefined && english in target) {
+        return target[english];
+      }
+      // 别名对应的英文方法也没有时照样交回 undefined：像「颜色」这种多义词
+      // 选 `hex` 还是 `color`，要由解释器按对象实际有的方法决定，与播放器一致。
+      return undefined;
     },
   });
   return proxy;
@@ -320,6 +449,9 @@ export function createRecordingObjects({
   const effectRecorder = createEffectRecorder({ clock, timeline });
   /** 没被赋给变量的灯，按顺序拿一个名字。 */
   let lightCounter = 0;
+  // 每台摄影机在时间线上有自己的 `camera:<名字>` 目标；同一时刻 active 只有一台。
+  const cameraStates = new Map();
+  let cameraCounter = 0;
 
   /**
    * 视频把两条记录拼起来：画面照旧走时间线（位置、透明度、显隐），
@@ -328,11 +460,11 @@ export function createRecordingObjects({
   function attachVideo(picture, sound) {
     const baseEnable = picture.enable;
     const baseDisable = picture.disable;
-    const reveal = () => baseEnable();
+    const reveal = (time) => baseEnable(time);
     const hide = () => baseDisable();
 
-    picture.enable = () => {
-      reveal();
+    picture.enable = (time = 0) => {
+      reveal(time);
       sound.enable();
       return picture;
     };
@@ -376,9 +508,16 @@ export function createRecordingObjects({
     };
     picture.duration = () => sound.duration();
     picture.audio = sound.audio;
+    // `del v` 要把声音一起放下：画面由 picture 自己的销毁钩子收掉，声轨另说。
+    const baseDestroy = picture[OBJECT_DESTROY];
+    picture[OBJECT_DESTROY] = () => {
+      baseDestroy();
+      sound.disable();
+    };
 
-    // 画面轨：显隐自己答，播放、暂停与速率交给播放头。
-    const media = chainable({
+    // 画面轨：显隐、播放、暂停与速率交给播放头；其余画面方法（移动、旋转、
+    // 缩放、透明度、滤镜与调色）转给同一层画面记录，和播放器的画面轨一致。
+    const mediaRecord = {
       kind: "VideoMedia",
       enable() {
         reveal();
@@ -405,16 +544,160 @@ export function createRecordingObjects({
         sound.media.speedTo(value, time);
         return media;
       },
-    });
-    // 滤镜与调色写在画面上，media 轨上的调用转给整层记录。
-    for (const name of ["blur", "brightness", "contrast", "saturate", "rgb", "rgbTo", "hex"]) {
-      media[name] = (...args) => {
+    };
+    for (const name of VIDEO_MEDIA_PICTURE_METHODS) {
+      if (typeof picture[name] !== "function") {
+        continue;
+      }
+      mediaRecord[name] = (...args) => {
         picture[name](...args);
         return media;
       };
     }
+    const media = chainable(mediaRecord);
     picture.media = media;
     return picture;
+  }
+
+  /**
+   * 摄影机的录制：每台一个 `camera:<名字>` 目标，只有 active 那台参与导出画面。
+   *
+   * 相机不读素材也不画在舞台上，所以状态全是数字；移动、视角、畸变都走同一条
+   * `commit`，带时长就登记成时间线插值。enable 会把别的相机同时置为 inactive，
+   * 多机位切换因此只是几行 set。
+   */
+  function makeCamera(args, context) {
+    const slot = context?.assignee ?? `camera-${(cameraCounter += 1)}`;
+    const target = `camera:${asText(slot)}`;
+    const options = {};
+    (PARAM_SPECS.Camera ?? []).forEach((name, index) => {
+      if (args?.[index] !== undefined) options[name] = args[index];
+    });
+    const start = normalizeCamera({ ...DEFAULT_CAMERA, ...options });
+    const state = {
+      x: start.x, y: start.y, z: start.z,
+      rotate: start.rotate, rotateH: start.rotateH, rotateV: start.rotateV,
+      fov: start.fov, k1: start.k1, k2: start.k2,
+      active: false,
+    };
+    cameraStates.set(target, state);
+    addSet(timeline, clock.now(), target, { ...state });
+
+    // 与画面对象同一条规矩：`del` 之后不再写时间线。
+    let destroyed = false;
+
+    function commit(patch, ms = 0) {
+      if (destroyed) {
+        return;
+      }
+      const at = clock.now();
+      const span = Number(ms) > 0 ? Number(ms) : 0;
+      if (span > 0) {
+        for (const [prop, value] of Object.entries(patch)) {
+          if (typeof value === "number" && typeof state[prop] === "number") {
+            addTween(timeline, at, at + span, target, prop, state[prop], value);
+          } else {
+            addSet(timeline, at, target, { [prop]: value });
+          }
+        }
+      } else {
+        addSet(timeline, at, target, patch);
+      }
+      Object.assign(state, patch);
+    }
+
+    function timed(ms) {
+      const span = Number(ms) > 0 ? Number(ms) : 0;
+      if (span > 0) {
+        context?.pending?.push(clock.wait(span));
+      }
+    }
+
+    const number = (value, fallback = 0) => {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : fallback;
+    };
+
+    const camera = {
+      kind: "Camera",
+      moveTo(x, y, z, time) {
+        const patch = {};
+        if (x !== undefined && x !== null) patch.x = number(x);
+        if (y !== undefined && y !== null) patch.y = number(y);
+        if (z !== undefined && z !== null) patch.z = number(z);
+        commit(patch, time);
+        timed(time);
+        return camera;
+      },
+      move(h, v, d, time) {
+        return camera.moveTo(
+          state.x + number(h),
+          state.y + number(v),
+          state.z + number(d),
+          time,
+        );
+      },
+      rotateTo(degrees, time) {
+        commit({ rotate: number(degrees, state.rotate) }, time);
+        timed(time);
+        return camera;
+      },
+      rotate(degrees, time) {
+        return camera.rotateTo(state.rotate + number(degrees), time);
+      },
+      rotateH(degrees, time) {
+        commit({ rotateH: number(degrees, state.rotateH) }, time);
+        timed(time);
+        return camera;
+      },
+      rotateV(degrees, time) {
+        commit({ rotateV: number(degrees, state.rotateV) }, time);
+        timed(time);
+        return camera;
+      },
+      fov(value, time) {
+        const next = normalizeCamera({ ...state, fov: number(value, state.fov) });
+        commit({ fov: next.fov }, time);
+        timed(time);
+        return camera;
+      },
+      distort(k1, k2, time) {
+        commit({
+          k1: number(k1),
+          k2: number(k2),
+        }, time);
+        timed(time);
+        return camera;
+      },
+      enable() {
+        if (!state.active) {
+          const at = clock.now();
+          for (const [key, other] of cameraStates) {
+            if (key !== target && other.active) {
+              addSet(timeline, at, key, { ...other, active: false });
+              other.active = false;
+            }
+          }
+        }
+        commit({ active: true });
+        return camera;
+      },
+      disable() {
+        commit({ active: false });
+        return camera;
+      },
+      /** `del cam`：在当下退出取景，之后不再写它的状态。 */
+      [OBJECT_DESTROY]() {
+        if (destroyed) {
+          return;
+        }
+        commit({ active: false });
+        destroyed = true;
+        camera.destroyed = true;
+      },
+    };
+    void context;
+    return camera;
   }
 
   function makeObject(kind, args, context) {
@@ -428,6 +711,9 @@ export function createRecordingObjects({
     } else if (kind === "Light") {
       // 灯同样不读素材：它按对象名写一条 `light:` 状态，渲染后端画成灯层。
       object = makeLight(args, context);
+    } else if (kind === "Camera") {
+      // 摄影机不画在舞台上，只写一条 `camera:` 状态供渲染后端取景。
+      object = makeCamera(args, context);
     } else {
       const picture = makePicture(kind, args, context);
       object = kind === "Video" && videoRecorder
@@ -446,6 +732,13 @@ export function createRecordingObjects({
     // 粒子与音频没有轮廓可勾，接住这个方法只为和其余对象同名。
     if (object && typeof object === "object" && typeof object.rim !== "function") {
       object.rim = () => object;
+    }
+    // 舞台上每个对象都能 `del`；将来新增的类型漏了销毁钩子时，这里补一个
+    // 空的，至少不会让整趟导出因为一条收尾语句失败。
+    if (object && typeof object === "object" && typeof object[OBJECT_DESTROY] !== "function") {
+      object[OBJECT_DESTROY] = () => {
+        object.destroyed = true;
+      };
     }
     return object;
   }
@@ -502,7 +795,13 @@ export function createRecordingObjects({
     // 灯建出来就有一条状态：没有它，渲染后端直到第一次 enable 才知道这盏灯。
     addSet(timeline, clock.now(), target, { ...state });
 
+    // 与画面对象同一条规矩：`del` 之后不再写时间线。
+    let destroyed = false;
+
     function commit(patch, ms = 0) {
+      if (destroyed) {
+        return;
+      }
       const at = clock.now();
       const span = Number(ms) > 0 ? Number(ms) : 0;
       if (span > 0) {
@@ -537,7 +836,7 @@ export function createRecordingObjects({
     const light = {
       kind: "Light",
       /** 这颗灯在时间线上的目标名，也是对象键的前缀。 */
-      key: target,
+      timelineKey: target,
       enable() {
         commit({ visible: true });
         return light;
@@ -545,6 +844,15 @@ export function createRecordingObjects({
       disable() {
         commit({ visible: false });
         return light;
+      },
+      /** `del lamp`：在当下熄掉这盏灯，之后不再写它的状态。 */
+      [OBJECT_DESTROY]() {
+        if (destroyed) {
+          return;
+        }
+        commit({ visible: false });
+        destroyed = true;
+        light.destroyed = true;
       },
       /** 这盏灯自己的三维坐标轴；和舞台一样默认隐藏。 */
       crood(value) {
@@ -699,7 +1007,12 @@ export function createRecordingObjects({
       exclude(targets, add) {
         const keys = new Set(state.excluded);
         for (const object of targets) {
-          const key = object?.key;
+          // 与播放器的 litKeyOf 同一条规则：只有背景与角色有剪影可排除，
+          // 其余类型（视频、粒子、文字、灯）都不接受。
+          const key =
+            object?.kind === "Background" || object?.kind === "Character"
+              ? object.timelineKey
+              : null;
           if (!key) {
             throw new Error("光照只能排除背景与角色");
           }
@@ -834,6 +1147,10 @@ export function createRecordingObjects({
       state[`mesh_${point}_dy`] = 0;
     }
     let speaker = "";
+    // `del ch` 之后这颗对象就下场了：变量虽已解开，但组或别的名字还可能提到它。
+    // 真舞台上销毁后的调用是空操作，录制端也一样 —— 不能再往时间线写状态，
+    // 否则一次迟到的 `enable` 会把它重新画回成片里。
+    let destroyed = false;
 
     /** `...To(x, y)` 是舞台坐标，要减掉对象位置与该点原本的矩形位置。 */
     function meshBase(handle) {
@@ -852,6 +1169,9 @@ export function createRecordingObjects({
 
     /** 登记一个状态变更；数值属性在 time 内线性插值。 */
     function commit(patch, ms = 0) {
+      if (destroyed) {
+        return;
+      }
       const t = clock.now();
       const duration = Number(ms) > 0 ? Number(ms) : 0;
       if (!draws) {
@@ -888,16 +1208,9 @@ export function createRecordingObjects({
     /** 滤镜是叠加的绝对量，和舞台一样由 `withLook` 校验并夹取。 */
     function setLook(property, value, ms) {
       state.look = withLook(state.look, property, value, kind);
-      commit(
-        {
-          look: state.look,
-          look_blur: state.look.blur,
-          look_brightness: state.look.brightness,
-          look_contrast: state.look.contrast,
-          look_saturate: state.look.saturate,
-        },
-        ms,
-      );
+      // 只写这次动的那一项：一次 cue 里连写两个滤镜时，另一项的过渡还在飞，
+      // 把它连同目标值重新登记会让它瞬间落位，与舞台的逐帧插值不一致。
+      commit({ look: state.look, [`look_${property}`]: state.look[property] }, ms);
       settle(ms);
     }
 
@@ -914,7 +1227,12 @@ export function createRecordingObjects({
       get name() {
         return speaker;
       },
-      enable() {
+      enable(time = 0) {
+        // 舞台的 enable 自带 show：给了时长就从透明渐显，没给就沿用既有透明度。
+        // 录制端过去只把 visible 写成 true，2000 这样的时长被丢掉，成片里文字
+        // 第一帧就不透明，看着像瞬间出现。
+        const span = Number(time) > 0 ? Number(time) : 0;
+        const enteringOpacity = span > 0 ? 0 : state.opacity;
         // 文字没有位图路径：第一次上台时把内容、样式与构造位置一起登记，
         // 否则渲染后端只会看到一个没有文字的可见层。
         if (kind === "Text") {
@@ -936,7 +1254,14 @@ export function createRecordingObjects({
             rotateH: state.rotateH,
             rotateV: state.rotateV,
             scale: state.scale,
-            opacity: state.opacity,
+            opacity: enteringOpacity,
+            // 舞台在 enable 时把记住的 look 一次性画出来；这里同样把当前滤镜
+            // 快照登记，写在 enable 之前的 blur 就不会留着一条未完的过渡。
+            look: state.look,
+            look_blur: state.look_blur,
+            look_brightness: state.look_brightness,
+            look_contrast: state.look_contrast,
+            look_saturate: state.look_saturate,
             crood: state.crood,
             lightPass: state.lightPass,
             rim: state.rim,
@@ -946,9 +1271,9 @@ export function createRecordingObjects({
           // 舞台那边 `enable()` 会把它们整套应用一次，成片要和预览一致。
           commit({
             visible: true,
-            // 把当前透明度也写进时间线：若此前 `hide()` 已把它压到 0，这里以 0
-            // 上台，随后的 `show(ms)` 才是从 0 渐显到 1 的过渡（而非瞬现）。
-            opacity: state.opacity,
+            // 把上台时的透明度写进时间线：给了时长就从 0 起跑，没给就沿用
+            // 既有值（例如 `hide().enable().show(ms)` 仍由 show 负责渐显）。
+            opacity: enteringOpacity,
             // `state.path` rather than the constructor's: a `group()` written
             // before `enable()` has already moved the picture on to its first
             // frame, and enabling must not put the empty definition back.
@@ -969,11 +1294,26 @@ export function createRecordingObjects({
               : {}),
           });
         }
+        if (span > 0) {
+          record.alpha(1, span);
+        }
         return proxy;
       },
       disable() {
         commit({ visible: false });
         return proxy;
+      },
+      /**
+       * `del ch`：导出只演一趟，没有素材要释放，但要在当下把这一层收掉，
+       * 后面的帧不再画它；此后对它的调用也不再写时间线。
+       */
+      [OBJECT_DESTROY]() {
+        if (destroyed) {
+          return;
+        }
+        commit({ visible: false });
+        destroyed = true;
+        record.destroyed = true;
       },
       /** 这个对象自己的三维坐标轴；默认隐藏，enable() 会把开关一并登记。 */
       crood(value) {
@@ -1154,11 +1494,16 @@ export function createRecordingObjects({
         commit({ fontWeight: state.fontWeight });
         return proxy;
       },
-      say(line, ms, audio) {
-        const waiting = recordingStage.sayLine(speaker || null, asText(line), {
-          time: Number(ms) || 0,
-          audio: typeof audio === "string" ? audio : null,
-        });
+      // 与真舞台的角色 say 一样按类型读尾参：数字是 time，字符串是配音名。
+      // 固定位置会把 `ch.say("文本", "vo")` 的配音读成时间而丢掉，进而误触发自动配音。
+      say(value, ...rest) {
+        const waiting = recordingStage.sayLine(speaker || null, asText(value), sayTiming(rest));
+        context?.pending?.push(waiting);
+        return proxy;
+      },
+      /** 续说：与角色 say 同形同参，接到当前这一句后面。 */
+      csay(value, ...rest) {
+        const waiting = recordingStage.csayLine?.(speaker || null, asText(value), sayTiming(rest));
         context?.pending?.push(waiting);
         return proxy;
       },
@@ -1203,6 +1548,114 @@ export function createRecordingObjects({
       },
       saturate(value, ms) {
         setLook("saturate", value, ms);
+        return proxy;
+      },
+      /**
+       * 清除：按效果名把状态复原，写进时间线的是一次过渡（渲染时逐帧插值）。
+       *
+       * 名字与舞台的 `flush` 同一套（`flush(scale)`、`flush(rgb) @ 5000`），不写
+       * 名字就是这一层的全部效果一起复原。时长不写就是立刻 —— 与舞台一样是
+       * 「复原到原样」，不是一次默认时长的移动。
+       */
+      flush(...args) {
+        // 与舞台一致：只有图片对象能清除，视频、特效与音频没有这个方法。
+        if (kind !== "Background" && kind !== "Character" && kind !== "Text") {
+          throw new Error(`${kind} 没有方法 flush`);
+        }
+        const asked = [];
+        let time;
+        for (const value of args) {
+          if (typeof value === "number") {
+            time = value;
+            continue;
+          }
+          const name = methodNameOf(value);
+          if (!name) {
+            throw new Error(`${kind} 的 flush 需要不带引号的效果名，例如 flush(scale)`);
+          }
+          asked.push(name);
+        }
+        const home = kind === "Background" ? BACKGROUND_DEPTH : 0;
+        // 能写进 `flush(…)` 的名字：别名也算，报错时列出的就是这一串。
+        // 文字没有 SVG 调色，但四个滤镜是 CSS 的，与图片一样能复原。
+        const known = [
+          ...FLUSH_PLACE,
+          "alpha",
+          "hide",
+          ...(isText ? FLUSH_TEXT : FLUSH_TINT),
+          ...Object.keys(FLUSH_LOOK),
+          ...(kind === "Character" ? ["transform"] : []),
+        ];
+        // 不写名字时复原的清单：每个状态只写一次，别名的重复不进来。
+        const all = isText
+          ? [...FLUSH_ALL_PLACE, ...FLUSH_TEXT, ...Object.keys(FLUSH_LOOK)]
+          : [
+              ...FLUSH_ALL_PLACE,
+              ...FLUSH_TINT,
+              ...Object.keys(FLUSH_LOOK),
+              ...(kind === "Character" ? ["transform"] : []),
+            ];
+        const names = asked.length ? asked : all.map((english) => ({ english, written: english }));
+        const patch = {};
+        let look = state.look;
+        let tinted = false;
+        for (const { english, written } of names) {
+          if (!known.includes(english)) {
+            throw new Error(`${kind} 没有可清除的 ${written}（可用：${known.join("、")}）`);
+          }
+          if (english === "move" || english === "moveTo") {
+            Object.assign(patch, { x: 0, y: 0, z: home });
+          } else if (english === "x" || english === "h" || english === "xTo" || english === "hTo") {
+            patch.x = 0;
+          } else if (english === "y" || english === "v" || english === "yTo" || english === "vTo") {
+            patch.y = 0;
+          } else if (english === "z" || english === "zTo") {
+            patch.z = home;
+          } else if (english === "rotate" || english === "rotateTo") {
+            patch.rotation = 0;
+          } else if (english === "rotateH" || english === "rotateHTo") {
+            patch.rotateH = 0;
+          } else if (english === "rotateV" || english === "rotateVTo") {
+            patch.rotateV = 0;
+          } else if (english === "scale" || english === "scaleTo") {
+            patch.scale = 1;
+          } else if (english === "alpha" || english === "hide") {
+            patch.opacity = 1;
+          } else if (FLUSH_TINT.includes(english)) {
+            tinted = true;
+          } else if (english in FLUSH_LOOK) {
+            look = withLook(look, english, FLUSH_LOOK[english], kind);
+          } else if (english === "transform") {
+            for (const point of TRANSFORM_POINTS) {
+              patch[`mesh_${point}_dx`] = 0;
+              patch[`mesh_${point}_dy`] = 0;
+            }
+          } else if (english === "color") {
+            const rgb = rgbOf(DEFAULT_TEXT_COLOR);
+            Object.assign(patch, { color: DEFAULT_TEXT_COLOR, colorIsRgb: Boolean(rgb) });
+            if (rgb) {
+              Object.assign(patch, { color_r: rgb.r, color_g: rgb.g, color_b: rgb.b });
+            }
+          } else if (english === "font") {
+            patch.fontFamily = "";
+          } else if (english === "weight") {
+            patch.fontWeight = TEXT_FONT_WEIGHT;
+          }
+        }
+        if (look !== state.look) {
+          Object.assign(patch, {
+            look,
+            look_blur: look.blur,
+            look_brightness: look.brightness,
+            look_contrast: look.contrast,
+            look_saturate: look.saturate,
+          });
+        }
+        if (tinted) {
+          Object.assign(patch, { tint: { r: 0, g: 0, b: 0 }, tint_r: 0, tint_g: 0, tint_b: 0 });
+        }
+        commit(patch, time);
+        settle(time);
         return proxy;
       },
       play(ms) {
@@ -1410,10 +1863,56 @@ export function createRecordingObjects({
       };
     }
 
-    // 这颗对象在时间线上的目标名。灯按这个名字排除它，所以与 `target` 同一份。
-    record.key = target;
-    record.media = chainable({ kind: "VideoMedia", enable: () => record.media, disable: () => record.media });
-    record.audio = chainable({ kind: "VideoAudio", play: () => record.audio, pause: () => record.audio });
+    // 这颗对象在时间线上的目标名，灯按这个名字排除它。不能叫 `key`：那是
+    // 剧本里的关键帧方法（`bg.key("…")`），一个字符串字段会把它盖掉。
+    record.timelineKey = target;
+    // 两条控制子轨只有视频有。有录像器时 `attachVideo` 会用真正的播放头换掉
+    // 这两个占位；没有时画面方法仍转给画面层，形状与播放器一致。
+    if (kind === "Video") {
+      const mediaOnly = {
+        kind: "VideoMedia",
+        enable: () => record.media,
+        disable: () => record.media,
+      };
+      for (const name of VIDEO_MEDIA_PICTURE_METHODS) {
+        if (typeof record[name] !== "function") {
+          continue;
+        }
+        mediaOnly[name] = (...args) => {
+          record[name](...args);
+          return record.media;
+        };
+      }
+      record.media = chainable(mediaOnly);
+      record.audio = chainable({
+        kind: "VideoAudio",
+        enable: () => record.audio,
+        disable: () => record.audio,
+        play: () => record.audio,
+        pause: () => record.audio,
+        mute: () => record.audio,
+        volume: () => record.audio,
+        loop: () => record.audio,
+        once: () => record.audio,
+        speed: () => record.audio,
+        speedTo: () => record.audio,
+        duration: () => Promise.resolve(0),
+      });
+    }
+
+    // 文字没有 SVG 调色：`hex` / `rgb` / `rgbTo` 在播放器里只挂在图片上。
+    // 留着它们会让多义的「颜色」先命中 `hex`，与播放器解析成 `color` 不同。
+    // 关键帧动画同理，播放器的 `Text` 也没有 `key`。
+    if (isText) {
+      delete record.hex;
+      delete record.rgb;
+      delete record.rgbTo;
+      delete record.key;
+    }
+    // 交叉溶解只有背景有（见播放器的 `Background.crossFade`）。
+    if (kind !== "Background") {
+      delete record.crossFade;
+    }
 
     const proxy = chainable(record);
     return proxy;
@@ -1454,6 +1953,9 @@ export function createRecordingObjects({
     Effect: factory("Effect"),
     Video: factory("Video"),
     Light: (args, context) => makeLight(args, context),
+    // 相机同样走 makeObject：播放器给每个对象都接了 crood / translucent / rim，
+    // 少接这三个会让 `cam.crood(true)` 这种写法在导出里报「没有方法」。
+    Camera: factory("Camera"),
   };
 }
 

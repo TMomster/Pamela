@@ -26,6 +26,22 @@ test("a virtual clock starts at zero and advances one exact frame per tick", () 
   assert.ok(Math.abs(clock.now() - 2000 / 30) < 1e-9);
 });
 
+test("advance jumps straight to the next deadline", async () => {
+  const clock = createVirtualClock();
+  const order = [];
+  clock.wait(5000).then(() => order.push("far"));
+  clock.wait(120).then(() => order.push("near"));
+  assert.equal(clock.advance(), true);
+  assert.ok(Math.abs(clock.now() - 4000 / 30) < 1e-6);
+  await flushMicrotasks();
+  assert.deepEqual(order, ["near"]);
+  assert.equal(clock.advance(), true);
+  assert.ok(Math.abs(clock.now() - 5000) < 1e-6);
+  await flushMicrotasks();
+  assert.deepEqual(order, ["near", "far"]);
+  assert.equal(clock.advance(), false);
+});
+
 test("parallel waits keep their own deadlines and resolve in due order", async () => {
   const clock = createVirtualClock();
   const order = [];
@@ -138,7 +154,7 @@ test("runtime.sleep drives interpret through a wait() statement", async () => {
 
 test("a cue hold lets the script proceed while its group timer keeps running", async () => {
   const clock = createVirtualClock();
-  const running = run("cue(50) {\n  wait(120)\n}\nx = 7", { sleep: clock.wait });
+  const running = run("cue(50)\n  wait(120)\nend\nx = 7", { sleep: clock.wait });
   await flushTasks();
   assert.equal(clock.pending(), 2, "the 50 ms hold and the 120 ms group timer coexist");
 

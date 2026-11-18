@@ -67,6 +67,7 @@ pub fn run(initial_project: Option<PathBuf>) {
             commands::export_finish,
             commands::export_abort,
             commands::reveal_path,
+            commands::open_project_folder,
         ])
         .run(tauri::generate_context!())
         .expect("failed to start the Pamela application");

@@ -959,45 +959,56 @@ export function createDialogue({
     settle();
   });
 
+  // 台词和「点击位置」共用同一个等待推进的槽位（`waiting`）。`cue` 里的语句
+  // 不互等，脚本走到下一句 say 时上一句可能还挂着；这里按调用顺序排队，让
+  // 下一句等到轮到自己再上屏，而不是报错或把上一句的 resolver 覆盖掉。
+  // 槽位空闲时仍然同步开场，保留编辑器即时渲染与既有演出的手感。
+  let dialogueTail = Promise.resolve();
+  let queuedWaits = 0;
+  let queueGeneration = 0;
+
+  const serializeWait = (start) => {
+    const generation = queueGeneration;
+    if (!waiting && queuedWaits === 0) {
+      const started = start();
+      dialogueTail = Promise.resolve(started).catch(() => {});
+      return started;
+    }
+    queuedWaits += 1;
+    const next = dialogueTail.then(
+      () => (generation === queueGeneration ? start() : undefined),
+      () => (generation === queueGeneration ? start() : undefined),
+    );
+    // 队尾吞掉错误，避免 cue 不等待的台词留下未处理的拒绝；返回给调用者的
+    // promise 仍然是原样的，解释器该报错还是会报错。
+    dialogueTail = next
+      .catch(() => {})
+      .finally(() => {
+        queuedWaits = Math.max(0, queuedWaits - 1);
+      });
+    return next;
+  };
+
   /**
    * Shows one line and answers a promise that a click resolves.
    *
    * The promise is handed to the interpreter, which waits on it, so a script
-   * never runs past a line on its own. Asking for a second line while one is
-   * still up is a `cue` block trying to speak twice at once, which is refused
-   * rather than resolved to one of them: neither reading of it is what a writer
-   * meant. Thrown synchronously, so the interpreter reports it in the status
-   * bar like any other script error.
+   * never runs past a line on its own. A `cue` can start a line without waiting
+   * for it; when the script gets to another line while the first is still up,
+   * the two lines share one queue and the second waits its turn. Only dialogue
+   * waits are serialized — animations started by the same `cue` still overlap.
    *
    * `append` is `csay`: the text is added to the line already on screen instead
    * of replacing it. Everything else — the wait for a click, the audio, the
    * auto-advance — is `say`'s own behaviour, and it is the same code here.
    */
-  const show = (name, value, opts, append) => {
-    // A replay seeks a saved node: the lines before it are travelled past,
-    // not read, so nothing is drawn and nothing waits — and neither auto nor
-    // skip applies, because there is no line up to advance.
-    if (isReplaying()) {
-      return Promise.resolve();
-    }
+  const showNow = (name, value, opts, append) => {
     const added = value == null ? "" : String(value);
     // 接在上一句后面时，框里最终显示的是「上一句 + 这一段」。这一句自己的计时、
     // 配音与逐字都只看这一段——前一段早已显示完，不该被重放一次。
+    // 这里在轮到本句时才读 `shownRaw`：排队的 csay 要接的是前一句的结果。
     const before = append ? [...stripRichText(shownRaw)].length : 0;
     const whole = append ? shownRaw + added : added;
-    // A preview travels to a moment to be looked at — the frame a key plays on.
-    // The line is drawn, because the dialogue box is part of the picture the
-    // author is placing a path against; it just does not wait, because the click
-    // that would release it is one no click occurs.
-    if (isPreviewing()) {
-      render(name, whole);
-      // 对白以外的地方（回放记录、导出）拿到的都是去掉颜色标记的文字。
-      onLine?.(name ?? null, stripRichText(whole));
-      return Promise.resolve();
-    }
-    if (waiting) {
-      throw new Error("cue 中不能同时显示两句台词，Pamela 不允许并发台词");
-    }
     // 进入新一句：先中断上一句可能仍在播放的配音（保险，正常已在落终态时停过）。
     stopActiveVoice();
     // `pendingLine` 是这句话新增的可见文字（`say` 就是整句，`csay` 只有接上的
@@ -1033,6 +1044,28 @@ export function createDialogue({
     return shown;
   };
 
+  const show = (name, value, opts, append) => {
+    // A replay seeks a saved node: the lines before it are travelled past,
+    // not read, so nothing is drawn and nothing waits — and neither auto nor
+    // skip applies, because there is no line up to advance.
+    if (isReplaying()) {
+      return Promise.resolve();
+    }
+    const added = value == null ? "" : String(value);
+    const whole = append ? shownRaw + added : added;
+    // A preview travels to a moment to be looked at — the frame a key plays on.
+    // The line is drawn, because the dialogue box is part of the picture the
+    // author is placing a path against; it just does not wait, because the click
+    // that would release it is one no click occurs.
+    if (isPreviewing()) {
+      render(name, whole);
+      // 对白以外的地方（回放记录、导出）拿到的都是去掉颜色标记的文字。
+      onLine?.(name ?? null, stripRichText(whole));
+      return Promise.resolve();
+    }
+    return serializeWait(() => showNow(name, value, opts, append));
+  };
+
   /** `say`: 这一句替换掉框里的上一句。 */
   const line = (name, value, opts) => show(name, value, opts, false);
 
@@ -1044,15 +1077,10 @@ export function createDialogue({
    *
    * 没有台词，只画一个点击标记：非自动模式下等玩家手动点击才放行；自动模式
    * 或导出时，`time` 是必须走完的等待时长（未给 time 时回落到 autoDelay）。
-   * 与 `line` 一样，它把 promise 交给解释器，让脚本停在这一点上。
+   * 与 `line` 一样，它把 promise 交给解释器，让脚本停在这一点上，并与台词
+   * 共用一条队列：两者都在等同一次点击，不能互相覆盖。
    */
-  const clickWait = (time) => {
-    if (isReplaying() || isPreviewing()) {
-      return Promise.resolve();
-    }
-    if (waiting) {
-      throw new Error("上一句还在等待点击，不能同时再设点击位置");
-    }
+  const clickWaitNow = (time) => {
     showClickMark();
     const shown = new Promise((resolve) => {
       waiting = resolve;
@@ -1065,6 +1093,13 @@ export function createDialogue({
       startCountdown(delay);
     }
     return shown;
+  };
+
+  const clickWait = (time) => {
+    if (isReplaying() || isPreviewing()) {
+      return Promise.resolve();
+    }
+    return serializeWait(() => clickWaitNow(time));
   };
 
   /**
@@ -1085,6 +1120,11 @@ export function createDialogue({
 
   const clear = () => {
     settle();
+    // 清场作废旧队列：还在排队的台词/点击等待轮到时直接放行，不把上一场的
+    // 对白画进新一场，也不让被中止的脚本挂在半路。
+    queueGeneration += 1;
+    queuedWaits = 0;
+    dialogueTail = Promise.resolve();
     hideCountdown();
     hideClickMark();
     if (advanceTimer != null) {

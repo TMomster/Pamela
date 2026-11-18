@@ -189,6 +189,11 @@ test("reading a file repairs what an older one left out", () => {
   assert.equal(inferGraph(back).trim(), 'hero = Character("h.png")\nhero.enable()');
 });
 
+test("enable 节点把时长写成渐显参数", () => {
+  const { graph } = scene({ behaviors: [{ method: "enable", params: { time: 2000 } }] });
+  assert.equal(inferGraph(graph).trim(), 'ch = Character("h.png")\nch.enable(2000)');
+});
+
 test("parseGraph falls back to an empty graph on bad input", () => {
   const graph = parseGraph("not json at all {{{");
   assert.equal(graph.nodes[0].type, "Start");
@@ -245,7 +250,7 @@ test("a block's body is ordered top to bottom, then left to right", () => {
   body[0].y = 300;
   body[1].y = 100;
   const code = inferGraph(graph);
-  assert.match(code, /cue \{/);
+  assert.match(code, /cue\s*\n/);
   assert.ok(code.indexOf('"后"') < code.indexOf('"先"'), "top-to-bottom order wins");
 });
 
@@ -1039,7 +1044,7 @@ test("a behaviour node's fields are the call's arguments", () => {
   const key = NODE_TYPES_FOR_TEST[behaviorTypeName("key")];
   assert.deepEqual(key.params.map((p) => p.key), ["file"]);
   const enable = NODE_TYPES_FOR_TEST[behaviorTypeName("enable")];
-  assert.deepEqual(enable.params, [], "a call with no arguments has no fields");
+  assert.deepEqual(enable.params.map((p) => p.key), ["time"], "enable 的时长字段确实存在");
 });
 
 test("a behaviour's object is what it was dropped on", () => {

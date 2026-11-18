@@ -13,6 +13,7 @@
 import { NODE_TYPES } from "./graph-editor.js";
 import { METHOD_SPECS, CONSTRUCTORS } from "./api-spec.js";
 import { BUILTIN_ALIASES } from "./pamela.js";
+import { DEFAULT_FOV } from "./space.js";
 
 const NODE_DEFAULTS = {
   Start: {},
@@ -30,6 +31,10 @@ const NODE_DEFAULTS = {
   TypeCharacterAdv: { image: "", x: 0, y: 0, scale: 1 },
   TypeBackgroundAdv: { image: "", x: 0, y: 0, scale: 1 },
   TypeLight: { color: "#ffffff" },
+  TypeCamera: {
+    x: 0, y: 0, z: -2000, fov: DEFAULT_FOV,
+    k1: 0, k2: 0, rotate: 0, rotateH: 0, rotateV: 0,
+  },
   TypeArray: { members: "" },
   // …and the node that uses the name in the flow.
   Object: { objectName: "ch" },
@@ -176,6 +181,25 @@ export function graphFromPamela(code) {
       tokens.push({ type: "close" });
       continue;
     }
+    // `end` closes a cue; `end wait` is `end wait -1`, and may name its own
+    // milliseconds. The time rides on the close token so the cue node keeps it.
+    const ended = /^end(?:\s+wait(?:\s*\(\s*(-?\d+(?:\.\d+)?)\s*\)|\s+(-?\d+(?:\.\d+)?))?)?$/.exec(t);
+    if (ended) {
+      const raw = ended[1] ?? ended[2];
+      tokens.push({
+        type: "close",
+        cueWait: /\bwait\b/.test(t) ? (raw === undefined ? -1 : Number(raw)) : null,
+      });
+      continue;
+    }
+    // A cue block opens when `cue` owns its line; `cue(3000)` / `cue @ 3000`
+    // carry the time. An inline `cue ch.hide()` is a statement, not a block.
+    const cueHead = /^cue(?:\s*\(\s*(-?\d+(?:\.\d+)?)\s*\)|\s+(-?\d+(?:\.\d+)?)|\s+@\s*(-?\d+(?:\.\d+)?))?$/.exec(t);
+    if (cueHead) {
+      const raw = cueHead[1] ?? cueHead[2] ?? cueHead[3];
+      tokens.push({ type: "open", kind: "cue", time: raw === undefined ? null : Number(raw) });
+      continue;
+    }
     if (t.endsWith("{")) {
       const m = /^(.*?)\s*\{$/.exec(t);
       const head = m ? m[1].trim() : t;
@@ -222,7 +246,7 @@ export function graphFromPamela(code) {
     tokens.push({ type: "stmt", text: t });
   }
 
-  // --- build a tree from brace structure ---
+  // --- build a tree from brace structure and cue/end pairs ---
   let i = 0;
   function parseBlock() {
     const stmts = [];
@@ -230,11 +254,12 @@ export function graphFromPamela(code) {
       const tk = tokens[i];
       if (tk.type === "close") {
         i += 1;
-        return stmts;
+        return { stmts, cueWait: tk.cueWait ?? null };
       }
       if (tk.type === "open") {
         i += 1;
-        const body = parseBlock();
+        const inner = parseBlock();
+        const body = inner.stmts;
         if (tk.kind === "if") {
           // An `else` sibling (from `} else {`) is merged in below, not nested
           // inside this body.
@@ -260,7 +285,7 @@ export function graphFromPamela(code) {
             defaultBody: def.length ? def[0].body : [],
           });
         } else if (tk.kind === "cue") {
-          stmts.push({ block: "cue", body, time: tk.time ?? null });
+          stmts.push({ block: "cue", body, time: tk.time ?? inner.cueWait });
         } else if (tk.kind === "func") {
           stmts.push({ block: "func", name: tk.name, args: tk.args, body });
         } else if (tk.kind === "else") {
@@ -285,9 +310,9 @@ export function graphFromPamela(code) {
       stmts.push({ stmt: tk.text });
       i += 1;
     }
-    return stmts;
+    return { stmts, cueWait: null };
   }
-  const tree = parseBlock();
+  const tree = parseBlock().stmts;
 
   // --- emit nodes and exec edges ---
   // Keep in step with GRAPH_VERSION in graph-editor.js; a reverse parse never
@@ -359,6 +384,7 @@ export function graphFromPamela(code) {
       Video: "clip",
       Text: "txt",
       Light: "lamp",
+      Camera: "cam",
       Array: "group",
     }[type] ?? "obj";
     // Only a declaration owns a name; a 对象 node is talking about one.
@@ -447,7 +473,15 @@ export function graphFromPamela(code) {
 
     const typeKey = advanced ? `Type${type}Adv` : `Type${type}`;
     const ctor = addNode(typeKey);
-    if (type === "Effect") ctor.params.effect = resource ? unquote(resource) : "rain";
+    if (type === "Camera") {
+      // 没有资源参数：第一个位置参数是 x，其余按名字写回数值字段。
+      const defaults = NODE_DEFAULTS.TypeCamera;
+      const values = { ...defaults, x: Number(resource) || 0, ...named };
+      for (const key of Object.keys(defaults)) {
+        const value = Number(values[key]);
+        ctor.params[key] = Number.isFinite(value) ? value : defaults[key];
+      }
+    } else if (type === "Effect") ctor.params.effect = resource ? unquote(resource) : "rain";
     else if (type === "Text") ctor.params.text = resource ? unquote(resource) : "";
     else if (type === "Light") ctor.params.color = resource ? unquote(resource) : "#ffffff";
     else if (type === "Array") ctor.params.members = args.join(", ");

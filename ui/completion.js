@@ -107,6 +107,8 @@ const STAGE_METHODS = [
   { label: "crood", detail: "(true/false) 显示或隐藏这个对象自己的三维坐标轴，默认隐藏" },
   { label: "element", detail: "(序号或图名) 取组里一张图的路径，序号从 0 起，可直接交给构造函数" },
   { label: "enable", detail: "() 显示到舞台" },
+  // 清除：名字写方法名本身、不带引号，所以它不是一条文本参数。
+  { label: "flush", detail: "(效果名…, time) 复原这些效果，如 flush(scale)、flush(rgb) @ 5000；不写名字复原全部" },
   { label: "fps", detail: "(每秒张数, 循环?) 播放图片组，1–144；默认播一遍，第二参 true 为循环" },
   { label: "group", detail: "(图片…) 把一组图片设成逐帧动画，画面停在第 1 张" },
   // HVD 的单轴写法：H 平轴（即 x）、V 升轴（即 y）。与 x / y 完全等价。
@@ -241,15 +243,21 @@ const CHARACTER_METHODS = [
 /**
  * What a Text answers to.
  *
- * It shares the picture frame — place, turn, size, opacity — but not the
- * filters, key frames or layer order: those belong to a bitmap, and a Text has
- * none. The list is alphabetical like every other.
+ * It shares the picture frame — place, turn, size, opacity — and the four CSS
+ * filters (a text element can be blurred or greyed out like a picture), but not
+ * bitmap tinting, key frames or layer order. The list is alphabetical like
+ * every other.
  */
 const TEXT_METHODS = [
   { label: "alpha", detail: "(0–1, time) 设置透明度，超出范围夹取" },
+  { label: "blur", detail: "(像素, time) 高斯模糊，0 为清晰；与另外三个滤镜叠加" },
+  { label: "brightness", detail: "(倍率, time) 亮度，1 为原样，0 全黑" },
   { label: "color", detail: '(颜色, time) 改文字颜色，任何 CSS 颜色如 "#ffd479"，可渐变' },
+  { label: "contrast", detail: "(倍率, time) 对比度，1 为原样，0 为一片灰" },
   { label: "crood", detail: "(true/false) 显示或隐藏这段文字自己的三维坐标轴，默认隐藏" },
   { label: "enable", detail: "() 把这段文字显示到舞台" },
+  // 文字的清除认位置、转角、大小、透明度、四个滤镜与颜色/字体（调色 rgb 只对位图）。
+  { label: "flush", detail: "(效果名…, time) 复原这些效果，如 flush(scale)、flush(color)；不写名字复原全部" },
   // HVD 的单轴写法：H 平轴（即 x）、V 升轴（即 y）。与 x / y 完全等价。
   { label: "h", detail: "(ΔH, time) 沿 H 平轴（即 x）相对移动这段文字" },
   { label: "hTo", detail: "(H, time) 把这段文字的绝对 H 坐标（即 x）设成 H" },
@@ -263,6 +271,7 @@ const TEXT_METHODS = [
   { label: "rotateTo", detail: "(角度, time) 旋转到指定角度" },
   { label: "rotateV", detail: "(角度, time) 沿 V 面（正立面）的圈抬落" },
   { label: "rotateVTo", detail: "(角度, time) 把 V 面的转角设到指定值" },
+  { label: "saturate", detail: "(倍率, time) 饱和度，1 为原样，0 为黑白" },
   { label: "scale", detail: "(倍率, time) 相对缩放" },
   { label: "scaleTo", detail: "(倍率, time) 缩放到指定倍率，1.0 为原尺寸" },
   { label: "rim", detail: "(0–1) 轮廓光：逆光时贴着轮廓勾一圈光，默认 0 不勾；文字暂不在灯层里" },
@@ -339,6 +348,29 @@ const LIGHT_METHODS = [
     label: "zTo",
     detail: "(Z, time) 把灯的绝对深度设成 Z：0 是舞台平面，正数在对象背后（会被它挡住），负数朝观众",
   },
+];
+
+/**
+ * What a camera answers to.
+ *
+ * A camera is a view, not a picture: it has no source and draws nothing. Its
+ * numbers move the frame over the one stage coordinate system, so enabling one
+ * never asks an object to remember where it stood.
+ */
+const CAMERA_METHODS = [
+  { label: "crood", detail: "(true/false) 坐标轴覆盖层：摄影机自己没有姿态轴，这个方法只为同名" },
+  { label: "disable", detail: "() 若自己是当前取景，退回内置默认相机" },
+  { label: "distort", detail: "(k1?, k2?, time?) 径向畸变：k1 负为桶形、正为枕形；k2 管边缘的二阶弯曲" },
+  { label: "enable", detail: "() 让这台相机成为当前取景，原先那台自动失活" },
+  { label: "fov", detail: "(角度, time?) 垂直视角：默认 30.21915°，值越大可见范围越大；1–179°" },
+  { label: "move", detail: "(h, v, d, time?) 沿世界三轴相对移动相机：d 为负数就是向后退" },
+  { label: "moveTo", detail: "(x, y, z, time?) 把相机移到绝对机位；默认 z 是 -2000" },
+  { label: "rim", detail: "(0–1) 轮廓光：相机不画在舞台上，这个方法只为同名" },
+  { label: "rotate", detail: "(角度, time?) 绕推轴滚，画面上顺时针为正" },
+  { label: "rotateH", detail: "(角度, time?) H 面方位角：相机从正面朝右转开" },
+  { label: "rotateTo", detail: "(角度, time?) 把绕推轴的转角设成绝对值" },
+  { label: "rotateV", detail: "(角度, time?) V 面抬落角：正数低头" },
+  { label: "translucent", detail: "(true/false) 透光：相机不挡光，这个方法只为同名" },
 ];
 
 /**
@@ -569,6 +601,12 @@ export const COMPLETIONS = [
     methods: LIGHT_METHODS,
   },
   {
+    name: "Camera",
+    kind: "object",
+    detail: "(x?, y?, z?, fov?, k1?, k2?, …) 摄影机：不画在舞台上，enable 后成为当前取景；即 stage.Camera(…)",
+    methods: CAMERA_METHODS,
+  },
+  {
     name: "Array",
     kind: "object",
     detail: "(对象…) 对象组：批量调用只需指向组，由 Pamela 分给每个成员；即 stage.Array(…)",
@@ -627,8 +665,9 @@ export const COMPLETIONS = [
       { label: "Video", fullOnly: true, detail: "(source, …) 建视频；等同 Video(…)" },
       { label: "Text", fullOnly: true, detail: '(内容, x?, y?, size?, color?, …) 建文字；等同 Text(…)' },
       { label: "Light", fullOnly: true, detail: '(颜色?, 强度?, x?, y?, …) 建光源；等同 Light(…)' },
+      { label: "Camera", fullOnly: true, detail: "(机位?, …) 建摄影机；enable 后成为当前取景；等同 Camera(…)" },
       { label: "Array", fullOnly: true, detail: "(对象…) 建对象组；等同 Array(…)" },
-      { label: "ambient", detail: "(0–2) 环境亮度：画面整体的乘算亮度，1 为原样" },
+      { label: "ambient", detail: "(0–2, time?) 环境亮度：画面整体的乘算亮度，1 为原样；给时间则渐变过去" },
       { label: "perspective", detail: "(true/false) 空间透视：默认关闭（正交空间，深度只分前后）；打开后近大远小" },
       { label: "guideline", detail: "(true/false, 间隔?) 空间参考线：每 100 坐标一条，间隔最小 10；无透视时只有横纵线，透视下每个深度截面各一圈" },
       {
@@ -688,7 +727,7 @@ export const COMPLETIONS = [
  * as well not be in the language.
  */
 const KEYWORDS = [
-  { label: "cue", detail: "(毫秒) 语句 或 { ... }：块内语句同时开始；cue(毫秒) 或块后 wait 毫秒决定多久后继续" },
+  { label: "cue", detail: "独占一行 + end 结束，或与一条语句同行（行内 cue）：块内语句同时开始；时间只写一次，cue(毫秒) / cue @ 毫秒 / end wait 毫秒" },
   { label: "func", detail: "名字(参数) { ... } 定义函数，用名字(实参) 调用" },
   { label: "if", detail: "条件 { ... }；条件必须是布尔值，可接 else / else if" },
   { label: "while", detail: "条件 { ... } 条件为真时重复执行块内语句" },
@@ -696,7 +735,8 @@ const KEYWORDS = [
   { label: "switch", detail: "值 { case 值 { ... } default { ... } } 按值多分支选择" },
   { label: "break", detail: "立刻离开所在的循环" },
   { label: "continue", detail: "跳过本轮剩下的语句，直接开始下一轮" },
-  { label: "wait", detail: "毫秒数 暂停一会儿（也可写 wait(毫秒)）；写在 cue 块 } 后面则决定块后多久继续，不带毫秒数即等整块结束" },
+  { label: "end", detail: "结束 cue 语句块；end 本身不等待，其后可写 wait 毫秒，单独 wait 即 wait -1" },
+  { label: "wait", detail: "毫秒数 暂停一会儿（也可写 wait(毫秒)）；写在 cue 的 end 后则决定块后多久继续，不带毫秒数即等整块结束" },
   { label: "choice", detail: '{ 标签表达式 { ... } ... } 让玩家选一项，选中分支的语句才执行' },
   { label: "include", detail: '"路径" 在该处演出另一个脚本文件（裸名从 scripts/ 取）' },
   { label: "use", detail: '("模板路径") 运行时切换对话框样式（如心声框）；路径可为变量/拼接/函数结果' },

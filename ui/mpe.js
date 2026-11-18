@@ -26,13 +26,17 @@ const CUE = "cue";
 const CUE_LINE = new RegExp(`^${CUE}(?=\\s|\\()`);
 
 /**
- * The head of a cue line: the keyword, and its time when it was bracketed.
+ * The head of a cue line: the keyword and its time, when one was given.
  *
- * A bracketed time is the full syntax (`cue(3000) { … }`), so it is matched as a
- * whole word — `(3000)` is part of the head rather than the first argument of
- * something called `cue`.
+ * Bracketed (`cue(3000)`) and companion (`cue @ 3000`) times are read as part
+ * of the head; the bare-number form (`cue 3000`) is read by `splitCue` so it
+ * cannot swallow the first word of a shorthand call. A bare `cue` opens a
+ * block that closes with `end`.
  */
-const CUE_HEAD = new RegExp(`^${CUE}(?:\\((?:[^()]|\\([^()]*\\))*\\))?(?=\\s|$)`);
+const CUE_HEAD = new RegExp(
+  `^${CUE}(?:\\((?:[^()]|\\([^()]*\\))*\\))?(?:\\s*@\\s*(?:-?\\d+(?:\\.\\d+)?|[\\p{L}_][\\p{L}\\p{N}_]*))?(?=\\s|$)`,
+  "u",
+);
 
 /** Whether a project-relative path names a shorthand script. */
 export function isMpePath(path) {
@@ -50,6 +54,7 @@ export function isMpePath(path) {
  */
 const KEYWORDS = new Set([
   "cue",
+  "end",
   "wait",
   "func",
   "if",
@@ -128,6 +133,10 @@ function readsNames(head, verb) {
   if (name === "Array" || method === "Array" || GROUP_METHODS.has(method)) {
     return true;
   }
+  // `小帕 清除 缩放`: the words are effect names — bare, never a line of dialogue.
+  if (method === "flush") {
+    return true;
+  }
   // `exclude 灯1 : 小帕` — two lists, and both of them objects.
   if (Object.hasOwn(VARIADIC_CALLS, method)) {
     return true;
@@ -148,11 +157,11 @@ function readsNames(head, verb) {
  * same order, so a line number means the same thing before and after and an
  * error mark lands on the line the author wrote.
  *
- * A statement block — `cue { … } wait 5000`, or an `if` / `func` / loop block —
- * needs no special handling: its opening and closing lines are already full
- * syntax and pass through untouched, while every line between them is compiled
- * as a shorthand statement of its own. The closing `wait` keeps its number,
- * which the `.pe` parser reads as the time the block is held for.
+ * A `cue` runs from its own line to `end`; an `if` / `func` / loop block uses
+ * braces. Neither needs special handling: the opening and closing lines are
+ * already full syntax and pass through untouched, while every line between
+ * them is compiled as a shorthand statement of its own. A `wait` after `end`
+ * keeps its number, which the `.pe` parser reads as the cue's time.
  *
  * @param {string} source
  * @returns {string}
@@ -251,6 +260,13 @@ function compileStatement(indent, statement) {
     return `${indent}${compileCall(head, "", "")}`;
   }
 
+  // `清除 缩放 : 小帕`, `清除 缩放 旋转 5000`: every argument of `flush` is a
+  // method name, so the second word is not a method here — reading it as one
+  // would ask a variable called 清除 to scale something.
+  if (englishNameFor(head) === "flush") {
+    return `${indent}${compileCall(head, "", rest, { names: true })}`;
+  }
+
   const verb = firstWord(rest);
   const tail = rest.slice(verb.length).trim();
   const asMethod = NAME.test(verb) && BUILTIN_METHODS.has(englishNameFor(verb));
@@ -299,7 +315,7 @@ function firstWord(text) {
 /**
  * Whether a line, already left-trimmed, opens a comment rather than a statement.
  *
- * `#` is deliberately absent: it starts a debug command (`# debug::com.player.skip`),
+ * `#` is deliberately absent: it starts a debug command (`# debug::com.player.start`),
  * which the shorthand neither reads nor rewrites — the line is handed to the `.pe`
  * compiler exactly as written.
  */
@@ -827,18 +843,19 @@ function scanObjectName(source, start) {
  * A `cue` line and the one statement it starts, as `.pe` text.
  *
  * `cue 3000 ch scale 0.5 . move 0 -300` is
- * `cue(3000) ch.scale(0.5).move(0, -300)`: the keyword and its time are the full
- * syntax, and everything after them is one shorthand statement — the compiler
- * reads it with the same rules as a line of its own, so a chain, a named
- * argument or a piece of dialogue all work there unchanged.
+ * `cue(3000) ch.scale(0.5).move(0, -300)`, and `cue @ 3000 ch hide` keeps its
+ * companion parameter: the keyword and its time are the full syntax, and
+ * everything after them is one shorthand statement — the compiler reads it
+ * with the same rules as a line of its own.
  *
  * A trailing `wait` belongs to the cue rather than to the call before it
- * (`cue 3000 ch hide wait`), so it is taken off before the statement is read
- * and written back after it.
+ * (`cue 3000 ch hide wait 5000`), so it is taken off before the statement is
+ * read and written back after it. The `.pe` parser rejects a cue that names
+ * its time both before and after the statement.
  *
  * @param {string} indent
  * @param {string} statement A line that begins with `cue`.
- * @returns {string | null} `null` when the line is the full syntax — a block —
+ * @returns {string | null} `null` when the line opens a block ending in `end`
  *   or when what follows the keyword is not a shorthand call.
  */
 function compileCue(indent, statement) {
@@ -847,26 +864,29 @@ function compileCue(indent, statement) {
     return null;
   }
   let body = cue.body;
-  let waited = false;
-  const trailing = /\s+wait$/.exec(body);
+  let wait = null;
+  const trailing = /\s+wait(?:\s*(\(\s*-?\d+(?:\.\d+)?\s*\)|-?\d+(?:\.\d+)?))?$/.exec(body);
   if (trailing) {
     body = body.slice(0, trailing.index);
-    waited = true;
+    wait = trailing[1] ?? "";
   }
   const compiled = body.trim() ? compileStatement("", body) : null;
   if (compiled === null) {
     return null;
   }
-  return `${indent}${cue.head} ${compiled}${waited ? " wait" : ""}`;
+  const suffix =
+    wait === null ? "" : wait === "" ? " wait" : wait.startsWith("(") ? ` wait${wait}` : ` wait ${wait}`;
+  return `${indent}${cue.head} ${compiled}${suffix}`;
 }
 
 /**
  * The head of a `cue` line — the keyword and its time — and the statement after it.
  *
- * The time may be written in parentheses (`cue(3000)`) or straight after the
- * keyword (`cue 3000`); both answer `cue(3000)`, so the compiled line always
- * says the same thing. A line that opens a block (`cue {`, `cue 3000 {`) is not
- * split: its braces, conditions and quoted labels are the full syntax.
+ * The time may be written in parentheses (`cue(3000)`), without them
+ * (`cue 3000`) or as a companion parameter (`cue @ 3000`); all three are kept
+ * in the head and the rest of the line is read as a shorthand statement. A
+ * bare `cue` line, or one still opening a brace block, is full syntax and is
+ * not split.
  *
  * @param {string} statement A line, already without its indent or comment.
  * @returns {{ head: string, body: string, bodyStart: number } | null}
@@ -887,9 +907,10 @@ function splitCue(statement) {
     return null;
   }
 
-  // `cue(3000)` already carries its time; `cue 3000` is rewritten to match, so
-  // the compiled line always spells it the same way.
-  let written = opener[0].slice(CUE.length);
+  let written = opener[0].slice(CUE.length).trim();
+  if (written.startsWith("@")) {
+    written = `@ ${written.slice(1).trim()}`;
+  }
   if (!written) {
     const number = /^-?\d+(?:\.\d+)?(?=\s|$)/.exec(rest);
     if (number) {
@@ -898,7 +919,12 @@ function splitCue(statement) {
     }
   }
   const bodyStart = statement.length - rest.length;
-  return { head: `${CUE}${written}`, body: rest, bodyStart };
+  const head = written.startsWith("(")
+    ? `${CUE}${written}`
+    : written
+      ? `${CUE} ${written}`
+      : CUE;
+  return { head, body: rest, bodyStart };
 }
 
 /**

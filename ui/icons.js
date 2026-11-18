@@ -63,6 +63,13 @@ const ICONS = {
   ],
   "chevron-down": [{ d: "m6 9 6 6 6-6" }],
   "chevron-up": [{ d: "m18 15-6-6-6 6" }],
+  // 资源区标题旁的「在资源管理器打开」：一个敞开的文件夹。
+  "folder-open": [
+    {
+      d:
+        "M6 14l1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2",
+    },
+  ],
   // The resource panel's collapse: two chevrons pointing the way it will move.
   "chevrons-left": [{ d: "m11 17-5-5 5-5M18 17l-5-5 5-5" }],
   "chevrons-right": [{ d: "m6 17 5-5-5-5M13 17l5-5-5-5" }],

@@ -15,11 +15,13 @@ import { createEffectLayer } from "./export-effect.js";
 import { paintGuideline } from "./guideline.js";
 import { PAMELA_INTRO_MS, drawPamelaIntro, pamelaIntroState } from "./pamela-intro.js";
 import {
-  CAMERA_DISTANCE,
   CORNERS,
+  DEFAULT_CAMERA,
   depthScale,
   isFlatPose,
+  normalizeCamera,
   orientationOf,
+  projectPoint,
   projectPose,
   quadTriangles,
   sceneOrder,
@@ -209,7 +211,7 @@ function hasMesh(picture) {
  * 之后的局部坐标里，scale(0.5) 时幅度被砍半，rotation 时方向还会偏。
  * 因此网格路径不套 ctx 的 pose 变换，pose 在这里一次算完。
  */
-export function meshNodes(picture, rect, size = LOGICAL_SIZE, perspective = false) {
+export function meshNodes(picture, rect, size = LOGICAL_SIZE, perspective = false, camera) {
   const width = Number(size?.width) || LOGICAL_SIZE.width;
   const height = Number(size?.height) || LOGICAL_SIZE.height;
   const radians = (clamp(picture.rotation ?? 0, -1e6, 1e6) * Math.PI) / 180;
@@ -227,18 +229,22 @@ export function meshNodes(picture, rect, size = LOGICAL_SIZE, perspective = fals
   const depth = clamp(picture.z ?? 0, -1e9, 1e9);
   const place = (stageX, stageY) => {
     if (!turned) {
-      return { x: width / 2 + stageX, y: height / 2 - stageY };
+      const at = projectPoint(
+        { x: stageX, y: stageY, z: depth },
+        { perspective, camera },
+      );
+      return { x: width / 2 + at.x, y: height / 2 - at.y };
     }
     const lx = stageX - pose.x;
     const ly = stageY - pose.y;
     const wx = turned[0] * lx + turned[1] * ly + pose.x;
     const wy = turned[3] * lx + turned[4] * ly + pose.y;
     const wz = turned[6] * lx + turned[7] * ly + depth;
-    // 正交空间里不按深度缩放：转过身的物体仍被压短，但不会朝灭点收过去。
-    const flat = perspective
-      ? CAMERA_DISTANCE / Math.max(1, CAMERA_DISTANCE + wz)
-      : 1;
-    return { x: width / 2 + wx * flat, y: height / 2 - wy * flat };
+    const at = projectPoint(
+      { x: wx, y: wy, z: wz },
+      { perspective, camera },
+    );
+    return { x: width / 2 + at.x, y: height / 2 - at.y };
   };
 
   const nodes = {};
@@ -319,11 +325,11 @@ function picturePose(picture) {
  * 与舞台写 `matrix3d` 用的是同一套数（`ui/space.js::projectPose`），所以预览
  * 里看到的形状就是成片里的形状。
  */
-function pictureCorners(picture, rect, size, perspective = false) {
+function pictureCorners(picture, rect, size, perspective = false, camera) {
   const projected = projectPose(
     picturePose(picture),
     { w: rect.dw, h: rect.dh },
-    { perspective },
+    { perspective, camera },
   );
   return CORNERS.map((handle) => {
     const at = projected.corners[handle];
@@ -367,37 +373,93 @@ function drawQuad(ctx, bitmap, rect, corners) {
  * 一阶近似 —— Canvas2D 没有能把字形扭成透视的工具，近处的放大、远侧的缩短
  * 只能体现在这个线性部分上。
  */
-function transformPose(ctx, picture, size, perspective = false) {
+function transformPose(ctx, picture, size, perspective = false, camera) {
   const pose = picturePose(picture);
   const { matrix } = orientationOf(pose);
-  const flat = depthScale(pose.z, perspective);
+  const flat = depthScale(pose.z, perspective, camera);
+  // 朝向矩阵只含三个转角；缩放要另乘上去。漏掉这一乘，文字的 `scaleTo`
+  // 在时间线上有值、成片里却完全不动（画布快路径只给位图用了缩放）。
+  // 轴向拉伸与 `scale` 是同一件事的两个分量，照舞台的 `R·S` 一起乘进来。
+  const sx = flat * pose.scale * pose.scaleX;
+  const sy = flat * pose.scale * pose.scaleY;
   ctx.translate(size.width / 2 + pose.x * flat, size.height / 2 - pose.y * flat);
   // 画布自身的局部坐标是 y 向下的，所以列向量要换个号：源的 +y 在画面上是
   // 往上，而画布的 +y 是往下。躺在 W 面里时这一组数正好是 `rotate` + `scale`。
   ctx.transform(
-    flat * matrix[0],
-    -flat * matrix[3],
-    -flat * matrix[1],
-    flat * matrix[4],
+    matrix[0] * sx,
+    -matrix[3] * sx,
+    -matrix[1] * sy,
+    matrix[4] * sy,
     0,
     0,
   );
 }
 
-/** 用八个三角形把位图投到变形后的网格上；节点已是画布像素坐标。 */
-function drawMesh(ctx, bitmap, rect, picture, size, perspective = false) {
-  const nodes = meshNodes(picture, rect, size, perspective);
+/** 网格节点投到画布上，再按深度收一次——和正式的网格画法同一套点。 */
+function meshNodesForDraw(picture, rect, size, perspective = false, camera) {
+  const nodes = meshNodes(picture, rect, size, perspective, camera);
   // 深度只缩放位置：八个控制点始终是舞台平面上的作者坐标。
-  const flat = depthScale(picture.z, perspective);
-  if (flat !== 1) {
-    for (const key of Object.keys(nodes)) {
-      const node = nodes[key];
-      nodes[key] = {
-        x: size.width / 2 + (node.x - size.width / 2) * flat,
-        y: size.height / 2 + (node.y - size.height / 2) * flat,
-      };
+  const flat = depthScale(picture.z, perspective, camera);
+  if (flat === 1) {
+    return nodes;
+  }
+  for (const key of Object.keys(nodes)) {
+    const node = nodes[key];
+    nodes[key] = {
+      x: size.width / 2 + (node.x - size.width / 2) * flat,
+      y: size.height / 2 + (node.y - size.height / 2) * flat,
+    };
+  }
+  return nodes;
+}
+
+/** 一张变形画面在灯层里用的三角剪影。画布坐标就是灯层的坐标。 */
+function lightMeshOf(rect, nodes) {
+  const pieces = [];
+  for (const triangle of MESH_TRIANGLES) {
+    const source = triangle.map((name) => {
+      const [u, v] = MESH_NODES[name];
+      return { x: (u - 0.5) * rect.dw, y: (v - 0.5) * rect.dh };
+    });
+    const target = triangle.map((name) => nodes[name]);
+    const matrix = affineFor(source, target);
+    if (matrix) {
+      pieces.push({ target, ...matrix });
     }
   }
+  const points = Object.values(nodes);
+  const xs = points.map((point) => point.x);
+  const ys = points.map((point) => point.y);
+  const left = Math.min(...xs);
+  const top = Math.min(...ys);
+  return {
+    pieces,
+    bounds: {
+      x: (left + Math.max(...xs)) / 2,
+      y: (top + Math.max(...ys)) / 2,
+      width: Math.max(...xs) - left,
+      height: Math.max(...ys) - top,
+    },
+  };
+}
+
+/** 网格在舞台坐标里的盒，暗部取样与灯场覆盖都用它。 */
+function meshStageRect(nodes, size) {
+  const xs = Object.values(nodes).map((point) => point.x - size.width / 2);
+  const ys = Object.values(nodes).map((point) => size.height / 2 - point.y);
+  const left = Math.min(...xs);
+  const top = Math.min(...ys);
+  return {
+    x: (left + Math.max(...xs)) / 2,
+    y: (top + Math.max(...ys)) / 2,
+    w: Math.max(...xs) - left,
+    h: Math.max(...ys) - top,
+  };
+}
+
+/** 用八个三角形把位图投到变形后的网格上；节点已是画布像素坐标。 */
+function drawMesh(ctx, bitmap, rect, picture, size, perspective = false, camera) {
+  const nodes = meshNodesForDraw(picture, rect, size, perspective, camera);
   for (const triangle of MESH_TRIANGLES) {
     const source = triangle.map((name) => {
       const [u, v] = MESH_NODES[name];
@@ -566,6 +628,8 @@ function drawPicture(
   perspective = false,
   /** 逆光暗部：这一张画面自己该被压暗多少，1 为原样（见 `lightShadeOf`）。 */
   shade = 1,
+  /** 当前取景的相机；缺省是内置固定相机。 */
+  camera,
 ) {
   if (picture.visible === false) {
     return;
@@ -610,17 +674,18 @@ function drawPicture(
   if (filter) {
     ctx.filter = filter;
   }
+  const distorted = Boolean(camera?.k1 || camera?.k2);
   if (hasMesh(picture)) {
     // 网格节点自带 pose：这里不能再 translate/rotate/scale，否则控制点偏移
     // 会被二次缩放/旋转（舞台的 by(dx,dy) 是与 pose 无关的世界位移）。
-    drawMesh(ctx, image, rect, picture, size, perspective);
-  } else if (!isFlatPose(picturePose(picture))) {
+    drawMesh(ctx, image, rect, picture, size, perspective, camera);
+  } else if (!isFlatPose(picturePose(picture)) || distorted) {
     // 转出 W 面：四边形逐片仿射贴图，近大远小与透视缩短都按同一套投影来。
-    drawQuad(ctx, image, rect, pictureCorners(picture, rect, size, perspective));
+    drawQuad(ctx, image, rect, pictureCorners(picture, rect, size, perspective, camera));
   } else {
     // 深度：z 越大越靠画面深处，位置朝中心收敛、尺寸同比缩小（z=0 时是 1）。
-    // 正交空间里 flat 恒为 1，位置与尺寸都不随 z 变。
-    const flat = depthScale(picture.z, perspective);
+    // 正交空间里 flat 恒为 1；相机的 FOV 与位移仍改变取景。
+    const flat = depthScale(picture.z, perspective, camera);
     ctx.translate(
       size.width / 2 + clamp(picture.x ?? 0, -1e6, 1e6) * flat,
       size.height / 2 - clamp(picture.y ?? 0, -1e6, 1e6) * flat,
@@ -973,7 +1038,7 @@ function drawDialogue(ctx, dialogue, size, measureText, plate = null, platePaint
  * 文字以自身中心对齐脚本坐标，与舞台上的 `translate(-50%, -50%)` 相同；
  * 换行只认作者写下的 `\n`，不做自动折行，所以成片与预览的断行一致。
  */
-function drawText(ctx, item, size, ambient = 1, perspective = false) {
+function drawText(ctx, item, size, ambient = 1, perspective = false, camera) {
   if (!item || item.visible === false) {
     return;
   }
@@ -987,8 +1052,14 @@ function drawText(ctx, item, size, ambient = 1, perspective = false) {
   const top = -((lines.length - 1) * lineHeight) / 2;
   ctx.save();
   ctx.globalAlpha = clamp(item.opacity ?? 1, 0, 1);
-  if (ambient !== 1) {
-    ctx.filter = `brightness(${ambient})`;
+  // 文字的四个滤镜与图片同走一条管线：`lookOf` 取时间线插值后的扁平值，
+  // 再和环境亮度合成一条 filter —— 与 `drawPicture` 的写法保持一致，光把
+  // brightness 覆盖掉会让逆光时作者写的模糊 / 饱和度一并丢失。
+  const filter = [lookString(lookOf(item)), ambient !== 1 ? `brightness(${ambient})` : ""]
+    .filter(Boolean)
+    .join(" ");
+  if (filter) {
+    ctx.filter = filter;
   }
   // 颜色是一段过渡时，时间线给出的是三个通道的插值；能插值就用它，否则
   // 用作者写的 CSS 颜色（`tomato` 之类拆不出通道的颜色只到点换色）。
@@ -1004,7 +1075,7 @@ function drawText(ctx, item, size, ambient = 1, perspective = false) {
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   // 姿态一次算完：深度、三个转角与缩放都在这一个矩阵里，和图片同一套投影。
-  transformPose(ctx, item, size, perspective);
+  transformPose(ctx, item, size, perspective, camera);
   for (let index = 0; index < lines.length; index += 1) {
     ctx.fillText(lines[index], 0, top + index * lineHeight);
   }
@@ -1028,6 +1099,8 @@ function classifyState(state) {
   let dialogue = null;
   // 舞台级的两把尺子：透视默认关（正交空间），参考线默认关。
   let perspective = false;
+  // 没有启用任何摄影机时，沿用舞台原先那台固定相机。
+  let camera = normalizeCamera(DEFAULT_CAMERA);
   let guideline = null;
   /** `stage.pamela()` 的开场动画，盖在所有图层之上。 */
   let pamelaIntro = null;
@@ -1045,6 +1118,11 @@ function classifyState(state) {
       perspective = value?.value === true;
     } else if (target === "guideline") {
       guideline = value;
+    } else if (target.startsWith("camera:")) {
+      // 多机位只认 active 那台；录制端保证同一时刻至多一个 active。
+      if (value?.active === true) {
+        camera = normalizeCamera(value);
+      }
     } else if (target.startsWith("light:")) {
       // 灯先于图片分出来，否则会被当成一张找不到素材的图片静默丢掉。
       if (value && typeof value === "object") {
@@ -1068,7 +1146,7 @@ function classifyState(state) {
   }
   return {
     pictures, videos, effects, texts, lights,
-    ambient, dialogue, perspective, guideline, pamelaIntro,
+    ambient, dialogue, perspective, camera, guideline, pamelaIntro,
   };
 }
 
@@ -1222,9 +1300,11 @@ export function createCanvasRenderer({
   /** 被灯照到的对象，按 `ui/light.js` 的剪影格式交出几何与位图。 */
   function litObjectsAt(groups, t) {
     const list = [];
+    const perspective = groups.perspective === true;
+    const camera = groups.camera ?? normalizeCamera(DEFAULT_CAMERA);
     for (const [target, picture] of groups.pictures) {
       const picturePath = spritePathAt(picture, t);
-      if (!picturePath || picture.visible === false) {
+      if (!picturePath || picture.visible === false || (picture.opacity ?? 1) <= 0) {
         continue;
       }
       const bitmap = bitmapAt(assets.get(picturePath), t, picture.frame);
@@ -1238,9 +1318,9 @@ export function createCanvasRenderer({
         continue;
       }
       // 灯光剪影跟着透视走：远处的对象在画面里更小、更靠中心；转过身之后
-      // 交出去的是投影后的四个角，边光才贴着它真正的轮廓。
+      // 交出去的是投影后的四个角，拉开过控制点的交出此刻的八个网格三角形。
       const pose = picturePose(picture);
-      const flat = depthScale(pose.z, groups.perspective === true);
+      const flat = depthScale(pose.z, perspective, camera);
       // 透光：角色默认挡光，其余类型默认让光穿过去（与 `ui/export-stage.js`
       // 写下的默认值一致；旧状态里没有这个字段时按类型补上）。
       const passLight = picture.lightPass === undefined
@@ -1264,11 +1344,25 @@ export function createCanvasRenderer({
         // 透光的对象不按深度挡灯（见 `ui/light.js` 的 `holesOf`）。
         cast: !passLight,
       };
-      if (!isFlatPose(pose)) {
+      if (hasMesh(picture)) {
+        const nodes = meshNodesForDraw(picture, rect, { width, height }, perspective, camera);
+        const box = meshStageRect(nodes, { width, height });
+        entry.x = box.x;
+        entry.y = box.y;
+        // 网格矩阵把这份未缩放的位图直接投到画布上，位置与缩放都在节点里。
+        entry.w = rect.dw;
+        entry.h = rect.dh;
+        entry.rotation = 0;
+        entry.scale = 1;
+        entry.scaleX = 1;
+        entry.scaleY = 1;
+        entry.rect = box;
+        entry.mesh = lightMeshOf(rect, nodes);
+      } else if (!isFlatPose(pose)) {
         const projected = projectPose(
           pose,
           { w: rect.dw, h: rect.dh },
-          { perspective: groups.perspective === true },
+          { perspective, camera },
         );
         entry.x = projected.center.x;
         entry.y = projected.center.y;
@@ -1330,6 +1424,8 @@ export function createCanvasRenderer({
     const ambient = clamp(groups.ambient?.value ?? 1, 0, 2);
     // 舞台的透视开关：整帧只读一次，所有层用同一个投影。
     const perspective = groups.perspective === true;
+    // 当前相机整帧只读一次，所有层共用同一份取景。
+    const camera = groups.camera ?? normalizeCamera(DEFAULT_CAMERA);
     ctx.save();
     ctx.globalAlpha = 1;
     ctx.filter = "none";
@@ -1366,16 +1462,24 @@ export function createCanvasRenderer({
         return 1;
       }
       const pose = picturePose(picture);
-      const flat = depthScale(pose.z, perspective);
-      const scale = pose.scale ?? 1;
+      const box = hasMesh(picture)
+        ? meshStageRect(
+          meshNodesForDraw(picture, rect, { width, height }, perspective, camera),
+          { width, height },
+        )
+        : (() => {
+          const flat = depthScale(pose.z, perspective, camera);
+          const scale = pose.scale ?? 1;
+          return {
+            x: (pose.x || 0) * flat,
+            y: (pose.y || 0) * flat,
+            w: rect.dw * scale * flat,
+            h: rect.dh * scale * flat,
+          };
+        })();
       return lightShadeOf(
         shadeLights,
-        {
-          x: (pose.x || 0) * flat,
-          y: (pose.y || 0) * flat,
-          w: rect.dw * scale * flat,
-          h: rect.dh * scale * flat,
-        },
+        box,
         Number(picture.z) || 0,
         target,
       );
@@ -1410,6 +1514,7 @@ export function createCanvasRenderer({
         ambient,
         perspective,
         shadeOf(picture, bitmap, target),
+        camera,
       );
     }
 
@@ -1426,6 +1531,8 @@ export function createCanvasRenderer({
         metrics,
         ambient,
         perspective,
+        1,
+        camera,
       );
     }
 
@@ -1438,7 +1545,7 @@ export function createCanvasRenderer({
 
     // 文字层在粒子之上、对话盒之下，与 `.stage__layer--text` 的 z-index 一致。
     for (const [, item] of groups.texts) {
-      drawText(ctx, item, { width, height }, ambient, perspective);
+      drawText(ctx, item, { width, height }, ambient, perspective, camera);
     }
 
     // 灯层在文字之上、对话盒之下，与 `.stage__layer--light` 一致。

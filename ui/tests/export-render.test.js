@@ -497,6 +497,72 @@ test("a text's colour is drawn from the interpolated channels when it has them",
   assert.equal(named?.[2], "tomato");
 });
 
+test("a text's scale and axial stretch are part of the pose it is drawn with", () => {
+  const transformFor = (extra) => {
+    const { calls, canvas } = fakeCanvas();
+    createCanvasRenderer({ canvas, assets: new Map() }).render({
+      "text:title": { visible: true, text: "字", ...extra },
+    });
+    return calls
+      .filter((call) => call[0] === "transform")
+      .at(-1)
+      .slice(1)
+      .map((value) => (Object.is(value, -0) ? 0 : value));
+  };
+
+  // 0° 时矩阵就是缩放本身：`scaleTo(2.0)` 的每个线性分量都翻倍。
+  assert.deepEqual(transformFor({ scale: 1 }), [1, 0, 0, 1, 0, 0]);
+  assert.deepEqual(transformFor({ scale: 2 }), [2, 0, 0, 2, 0, 0]);
+  // 转过 90° 之后缩放仍作用在各自的轴上：与 CSS 的 `rotate(90deg) scale(2)`
+  // 同一个矩阵（canvas 的 b/c 正是 CSS matrix 的第二、三项）。
+  assert.deepEqual(
+    transformFor({ scale: 2, rotation: 90 }).map((value) => Math.round(value)),
+    [0, 2, -2, 0, 0, 0],
+  );
+  // 轴向拉伸与 `scale` 同乘：文字的网格与位图共享同一套姿态。
+  assert.deepEqual(transformFor({ scale: 2, scaleX: 0.5, scaleY: 0.25 }), [1, 0, 0, 0.5, 0, 0]);
+});
+
+test("a text's look filters are drawn, combined with the ambient brightness", () => {
+  const filters = (calls) =>
+    calls.filter((call) => call[0] === "set" && call[1] === "filter").map((call) => call[2]);
+
+  const { calls, canvas } = fakeCanvas();
+  createCanvasRenderer({ canvas, assets: new Map() }).render({
+    "text:title": {
+      visible: true,
+      text: "字",
+      look_blur: 4,
+      look_brightness: 1.2,
+      look_contrast: 1,
+      look_saturate: 0.3,
+    },
+  });
+  const drawn = filters(calls).at(-1);
+  assert.match(drawn, /blur\(4px\)/);
+  assert.match(drawn, /brightness\(1\.2\)/);
+  assert.match(drawn, /saturate\(0\.3\)/);
+  assert.doesNotMatch(drawn, /contrast\(/);
+
+  // 环境压暗要叠加在滤镜之后，不能把作者写的模糊洗掉。
+  const dim = fakeCanvas();
+  createCanvasRenderer({ canvas: dim.canvas, assets: new Map() }).render({
+    "text:title": { visible: true, text: "字", look_blur: 6, look_brightness: 1.2 },
+    ambient: { value: 0.6 },
+  });
+  const withAmbient = filters(dim.calls).at(-1);
+  assert.match(withAmbient, /blur\(6px\)/);
+  assert.match(withAmbient, /brightness\(1\.2\)/, "作者写的亮度留着");
+  assert.match(withAmbient, /brightness\(0\.6\)/, "环境亮度另写一条");
+
+  // 没有滤镜、没有环境光时，文字不该凭空多出一条 filter（帧首的 none 除外）。
+  const plain = fakeCanvas();
+  createCanvasRenderer({ canvas: plain.canvas, assets: new Map() }).render({
+    "text:title": { visible: true, text: "字" },
+  });
+  assert.deepEqual(filters(plain.calls), ["none"]);
+});
+
 test("a frame clears, draws pictures in layer order and types only revealed text", () => {
   const { calls, canvas } = fakeCanvas();
   const assets = new Map([

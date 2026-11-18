@@ -228,6 +228,50 @@ const session = {
 };
 
 /**
+ * The two editor groups.
+ *
+ * A pane owns its tab strip, its own shared surfaces (text, highlight, find bar
+ * and so on) and the state that used to live only on `session`: which file is
+ * active, which view it is on and whether the reader is showing. `session` keeps
+ * mirroring the focused pane, so the rest of the application can keep reading
+ * one active document while both panes stay live.
+ */
+const panes = [
+  {
+    id: "primary",
+    side: "left",
+    element: null,
+    surface: null,
+    tabsEl: null,
+    dom: null,
+    order: [],
+    openPath: null,
+    view: "code",
+    reader: null,
+    readerActive: false,
+    keyFile: null,
+    savedText: "",
+    savedJson: "",
+    completion: null,
+    findBar: null,
+    gutterLines: 0,
+    tintText: null,
+    tintHost: null,
+    tintHidden: null,
+    findMarkText: null,
+  },
+];
+let splitPanes = false;
+let activePane = panes[0];
+
+/** Tab keys are strings so a pane's order can also hold non-file tabs. */
+const readerTabKey = () => "reader";
+const stageTabKey = () => "stage";
+const keyframesTabKey = () => "keyframes";
+const docTabKey = (path) => `doc:${path}`;
+const pathFromTabKey = (key) => (String(key).startsWith("doc:") ? String(key).slice(4) : null);
+
+/**
  * The pictures and sounds a run has read, by path.
  *
  * A scene re-shows the same picture on every branch and a replay walks the
@@ -259,6 +303,9 @@ const readerPanel = createReaderPanel({
   session,
   refreshResourcePanel,
   refreshEditor,
+  getActivePane: () => activePane,
+  addReaderTab: (pane) => addTabToPane(pane, readerTabKey()),
+  removeReaderTab: () => removeTabEverywhere(readerTabKey()),
 });
 
 const fileOps = createFileOps({
@@ -299,7 +346,8 @@ const treeOps = createTreeOps({
 });
 
 
-const findBar = createFindBar({ dom, editorRangeRect });
+/** The focused pane's find bar; created per pane in `wireEditorPane`. */
+let findBar = null;
 
 
 const playback = createPlaybackBar({
@@ -465,6 +513,10 @@ function refreshResourcePanel() {
   if (dom.resourceRefresh) {
     dom.resourceRefresh.hidden = Boolean(reading);
   }
+  // 目录与项目无关：没有项目文件夹可打开，按钮跟着刷新一起让位。
+  if (dom.resourceReveal) {
+    dom.resourceReveal.hidden = Boolean(reading);
+  }
   if (reading) {
     const toc = readerPanel.toc(reading.setName, reading.articleId);
     if (toc) {
@@ -531,6 +583,30 @@ function wireResourceRefresh() {
     } finally {
       button.classList.remove("is-busy");
     }
+  });
+}
+
+/**
+ * Wires 「在资源管理器打开」 in the resource panel's header.
+ *
+ * The button hands the project folder to the system file manager, which is where
+ * everything the editor deliberately does not do happens: a backup, a commit, a
+ * zip to send to someone. The folder's path lives in the back end; the front end
+ * only ever names paths inside the project, so the command takes no argument.
+ */
+function wireResourceReveal() {
+  const button = document.getElementById("resource-reveal");
+  if (!button) {
+    return;
+  }
+  button.addEventListener("click", () => {
+    if (!session.project) {
+      setMessage("尚未打开项目", { error: true });
+      return;
+    }
+    invokeBridge("open_project_folder").catch((error) =>
+      setMessage(`无法打开文件夹：${describeError(error)}`, { error: true }),
+    );
   });
 }
 
@@ -733,9 +809,22 @@ function attachResourceShortcuts() {
  * @param {boolean} [options.dirty]
  * @param {() => void} [options.onSelect] Brings the tab's surface forward.
  * @param {() => void} [options.onClose] Omit for a tab with no close button.
+ * @param {string} [options.paneId] Owning pane, for the context menu.
+ * @param {string} [options.tabKey] Key of the tab in that pane's order.
+ * @param {"left" | "right"} [options.pinnedSide] Side the tab is docked to.
  * @returns {HTMLElement}
  */
-function createTab({ label, kind, active = false, dirty = false, onSelect, onClose }) {
+function createTab({
+  label,
+  kind,
+  active = false,
+  dirty = false,
+  onSelect,
+  onClose,
+  paneId,
+  tabKey,
+  pinnedSide,
+}) {
   const tab = document.createElement("div");
   tab.className = "tab";
   if (kind) {
@@ -746,6 +835,15 @@ function createTab({ label, kind, active = false, dirty = false, onSelect, onClo
   }
   if (dirty) {
     tab.classList.add("tab--dirty");
+  }
+  if (pinnedSide) {
+    tab.classList.add(`tab--pin-${pinnedSide}`);
+  }
+  if (paneId) {
+    tab.dataset.pane = paneId;
+  }
+  if (tabKey) {
+    tab.dataset.tab = tabKey;
   }
   tab.setAttribute("role", "tab");
   tab.setAttribute("aria-selected", String(active));
@@ -870,15 +968,148 @@ function activeDoc() {
   return session.openPath ? session.docs.get(session.openPath) ?? null : null;
 }
 
+/** DOM keys that belong to a pane rather than to the window. */
+const PANE_DOM_KEYS = [
+  "editorTabs",
+  "editorCode",
+  "editorText",
+  "editorGutter",
+  "editorGutterInner",
+  "editorHighlight",
+  "editorHighlightInner",
+  "editorPane",
+  "editorFindBar",
+  "editorFindInput",
+  "editorFindReplace",
+  "editorFindInfo",
+  "editorFindPrev",
+  "editorFindNext",
+  "editorFindReplaceOne",
+  "editorFindReplaceAll",
+  "editorFindClose",
+  "editorFindCase",
+  "editorFindRegex",
+  "editorFindOverlay",
+  "editorFindInner",
+  "editorErrorInner",
+  "editorTint",
+  "editorTintInner",
+  "editorCallHighlight",
+  "editorEmpty",
+  "imageView",
+  "imageImage",
+  "imageMeta",
+  "readerView",
+];
+
+/** `session.order` stays the union of open documents across both panes. */
+function syncPaneOrder() {
+  const seen = new Set();
+  const order = [];
+  for (const pane of panes) {
+    for (const key of pane.order) {
+      const path = pathFromTabKey(key);
+      if (path && !seen.has(path)) {
+        seen.add(path);
+        order.push(path);
+      }
+    }
+  }
+  session.order = order;
+}
+
+/** Copies the live aliases back into `pane`'s own state. */
+function captureActiveState(pane = activePane) {
+  pane.openPath = session.openPath;
+  pane.view = session.view;
+  pane.keyFile = session.keyFile;
+  pane.savedText = session.savedText;
+  pane.savedJson = session.savedJson;
+  pane.readerActive = Boolean(session.reader) && Boolean(pane.reader);
+  pane.gutterLines = gutterLines;
+  pane.tintText = tintText;
+  pane.tintHost = tintHost;
+  pane.tintHidden = tintHidden;
+  pane.findMarkText = findMarkText;
+}
+
+/** Points the shared aliases at `pane`, without moving the focus itself. */
+function applyPaneState(pane) {
+  syncPaneOrder();
+  session.openPath = pane.openPath;
+  session.view = pane.view;
+  session.keyFile = pane.keyFile;
+  session.savedText = pane.savedText;
+  session.savedJson = pane.savedJson;
+  session.reader = pane.readerActive ? pane.reader : null;
+  for (const key of PANE_DOM_KEYS) {
+    if (pane.dom?.[key] !== undefined) {
+      dom[key] = pane.dom[key];
+    }
+  }
+  gutterLines = pane.gutterLines;
+  tintText = pane.tintText;
+  tintHost = pane.tintHost;
+  tintHidden = pane.tintHidden;
+  findMarkText = pane.findMarkText;
+  completion = pane.completion ?? null;
+  findBar = pane.findBar ?? null;
+  syncEditors();
+}
+
+/** Runs `fn` with the aliases of `pane`, then puts the focused pane back. */
+function withPane(pane, fn) {
+  if (!pane || pane === activePane) {
+    return fn();
+  }
+  captureActiveState();
+  applyPaneState(pane);
+  try {
+    return fn();
+  } finally {
+    captureActiveState(pane);
+    applyPaneState(activePane);
+  }
+}
+
+/** Makes `pane` the focused editor group. */
+function focusPane(pane) {
+  if (!pane || pane === activePane) {
+    return;
+  }
+  stashActive();
+  captureActiveState();
+  activePane = pane;
+  applyPaneState(pane);
+  const doc = activeDoc();
+  if (doc) {
+    restoreDoc(doc);
+  }
+  refreshEditor();
+}
+
+/** Which pane owns a DOM node (tabs, surfaces, editors). */
+function paneForTarget(target) {
+  const element = target instanceof Element ? target.closest(".editor__pane") : null;
+  return panes.find((pane) => pane.element === element) ?? activePane;
+}
+
+/** A surface shared by the two panes lives in whichever pane is showing it. */
+function mountSurface(pane, element) {
+  if (element && pane.surface && element.parentElement !== pane.surface) {
+    pane.surface.append(element);
+  }
+}
+
 /** The surface a kind is drawn in — null for the shared ones (script, viewer). */
-function containerFor(doc) {
+function containerFor(doc, pane = activePane) {
   if (doc.kind === "script") {
     return null;
   }
   const element = document.createElement("div");
   element.className = DOC_CONTAINER_CLASS[doc.kind] ?? "doc-view";
   element.hidden = true;
-  dom.editorCode?.parentElement?.append(element);
+  (pane.surface ?? dom.editorCode?.parentElement)?.append(element);
   return element;
 }
 
@@ -901,10 +1132,40 @@ function ensureDoc(path) {
     scroll: 0,
     caret: 0,
   };
-  doc.container = containerFor(doc);
+  doc.container = containerFor(doc, activePane);
   session.docs.set(path, doc);
-  session.order.push(path);
+  addTabToPane(activePane, docTabKey(path));
   return doc;
+}
+
+/** Adds a tab key to a pane at the end, unless it is already there. */
+function addTabToPane(pane, key) {
+  if (!pane.order.includes(key)) {
+    pane.order.push(key);
+  }
+  syncPaneOrder();
+}
+
+/** Removes a tab key from whichever pane holds it. */
+function removeTabEverywhere(key) {
+  for (const pane of panes) {
+    pane.order = pane.order.filter((item) => item !== key);
+  }
+  syncPaneOrder();
+}
+
+/** Moves a tab key to a pane, returning the pane it came from. */
+function moveTabToPane(key, pane) {
+  const from = panes.find((item) => item.order.includes(key)) ?? null;
+  if (from === pane) {
+    return from;
+  }
+  for (const item of panes) {
+    item.order = item.order.filter((value) => value !== key);
+  }
+  addTabToPane(pane, key);
+  syncPaneOrder();
+  return from;
 }
 
 /** Copies the live surface back into its document before switching away. */
@@ -1118,204 +1379,230 @@ function disposeDoc(doc) {
   doc.editor = null;
 }
 
-function refreshEditor() {
-  refreshRunButton();
-  if (!dom.editorText || !dom.editorEmpty) {
-    return;
-  }
-  // Redrawing the editor means the text the suggestions were read from is being
-  // replaced, so any list still up is about to describe the wrong script — and
-  // a repaint still in flight must not open a new one over the new file.
-  completion?.dismiss();
-  const hasFile = Boolean(session.openPath);
-  // The key frame editor is a document of its own, drawn over the stage. It
-  // shows while its own tab is the active one — `session.view === "stage"` with
-  // the editor open — and the script stays on screen behind it otherwise.
-  const keyEditing = Boolean(session.keyFile) && Boolean(pathEditor?.isOpen());
-  // The active tab decides which surface fills the editor area: a dialogue style
-  // file is edited as a box, an image is shown, the node map as a map.
-  const doc = activeDoc();
-  const kind = doc?.kind ?? null;
-  const isDialog = kind === "dialog";
-  const isImage = kind === "image";
-  const isImageEdit = isImage && session.view === "imageEdit";
-  const isAudioEdit = kind === "audio";
-  const isGraph = kind === "graph";
-  const showGraph = isGraph && session.view === "graph";
-  // The stage shares the editor area with the code, and only exists while a
-  // script has been run — or while a load is being chosen, which has to show
-  // the grid even though no run is on yet. Without a file there is nothing to
-  // run from. The key frame editor needs no file open: it is opened over the
-  // scene it belongs to, which is a document of its own.
-  const showStage =
-    (hasFile || keyEditing) &&
-    session.view === "stage" &&
-    (Boolean(session.stageName) || slotsOpen() || keyEditing);
-  const showDialog = isDialog && session.view === "dialog";
-  const showImage = isImage && session.view === "image";
-  const showImageEdit = isImageEdit;
-  const showAudioEdit = isAudioEdit;
-  // The reader borrows the editor area and takes precedence over whatever
-  // document is open: it is entered from the toolbar, and leaving it is opening
-  // a tab again rather than closing the reader first.
-  const reading = Boolean(session.reader);
+/** Paints the surfaces and tab strip of one pane. */
+function renderPane(pane) {
+  withPane(pane, () => {
+    // Redrawing the editor means the text the suggestions were read from is
+    // being replaced, so any list still up would describe the wrong script.
+    completion?.dismiss();
+    const hasFile = Boolean(session.openPath);
+    const keyEditing = Boolean(session.keyFile) && Boolean(pathEditor?.isOpen());
+    const doc = activeDoc();
+    const kind = doc?.kind ?? null;
+    const isDialog = kind === "dialog";
+    const isImage = kind === "image";
+    const isImageEdit = isImage && session.view === "imageEdit";
+    const isAudioEdit = kind === "audio";
+    const isGraph = kind === "graph";
+    const showGraph = isGraph && session.view === "graph";
+    const showStage =
+      (hasFile || keyEditing) &&
+      session.view === "stage" &&
+      (Boolean(session.stageName) || slotsOpen() || keyEditing);
+    const showDialog = isDialog && session.view === "dialog";
+    const showImage = isImage && session.view === "image";
+    const showImageEdit = isImageEdit;
+    const showAudioEdit = isAudioEdit;
+    const reading = Boolean(session.reader);
 
-  if (dom.editorCode) {
-    dom.editorCode.hidden =
-      reading ||
-      !hasFile ||
-      showStage ||
-      isDialog ||
-      isImage ||
-      isImageEdit ||
-      isAudioEdit ||
-      isGraph;
-  }
-  dom.editorEmpty.hidden = reading || hasFile || keyEditing;
-  if (dom.stageView) {
-    dom.stageView.hidden = reading || !showStage;
-    // Leaving the stage tab takes the pointer reading with it — the pointer is
-    // somewhere else now, and no `pointerleave` will say so.
-    if (dom.stageView.hidden) {
-      clearPointerReading();
-      // The corner menu goes with it: it is open only while the pointer is in
-      // the corner, and a hidden stage has no corner to be in.
-      stageMenu?.close();
+    if (dom.editorCode) {
+      dom.editorCode.hidden =
+        reading || !hasFile || showStage || isDialog || isImage || isImageEdit || isAudioEdit || isGraph;
     }
-  }
-  if (dom.readerView) {
-    dom.readerView.hidden = !reading;
-  }
-  if (reading) {
-    readerPanel.render();
-  }
-  // The menu's lit words follow the stage: while it is off screen there is
-  // nothing for them to say, and a stale "auto on" would outlive its run.
-  if (!showStage) {
-    closeSlots();
-    playback.closeSettings();
-  }
-  playback.refreshMenu();
-  if (dom.dialogView) {
-    dom.dialogView.hidden = reading || !showDialog;
-  }
-  if (dom.imageView) {
-    dom.imageView.hidden = reading || !showImage;
-  }
-  if (dom.imageEditView) {
-    dom.imageEditView.hidden = reading || !showImageEdit;
-  }
-  if (dom.audioEditView) {
-    dom.audioEditView.hidden = reading || !showAudioEdit;
-  }
-  if (dom.graphView) {
-    dom.graphView.hidden = reading || !showGraph;
-  }
+    dom.editorEmpty.hidden = reading || hasFile || keyEditing;
+    if (dom.stageView) {
+      // The stage is a single surface: whichever pane shows it owns the node.
+      const ownsStage = dom.stageView.parentElement === pane.surface;
+      if (showStage && !reading) {
+        mountSurface(pane, dom.stageView);
+      }
+      // The other pane must not hide a scene that belongs to this one.
+      if (ownsStage || (showStage && !reading)) {
+        dom.stageView.hidden = reading || !showStage;
+        if (dom.stageView.hidden) {
+          clearPointerReading();
+          stageMenu?.close();
+        }
+      }
+    }
+    if (dom.readerView) {
+      dom.readerView.hidden = !reading;
+    }
+    if (reading) {
+      readerPanel.render(pane);
+    }
+    // The stage's overlays belong to the window, not to either pane.
+    if (pane === activePane) {
+      if (!showStage) {
+        closeSlots();
+        playback.closeSettings();
+      }
+      playback.refreshMenu();
+    }
+    if (dom.dialogView) {
+      dom.dialogView.hidden = reading || !showDialog;
+    }
+    if (dom.imageView) {
+      dom.imageView.hidden = reading || !showImage;
+    }
+    if (dom.imageEditView) {
+      dom.imageEditView.hidden = reading || !showImageEdit;
+    }
+    if (dom.audioEditView) {
+      dom.audioEditView.hidden = reading || !showAudioEdit;
+    }
+    if (dom.graphView) {
+      dom.graphView.hidden = reading || !showGraph;
+    }
+    if (hasFile && !showStage && !isDialog && !isImage) {
+      updateGutter();
+      updateTintMarkers();
+    }
 
-  if (hasFile && !showStage && !isDialog && !isImage) {
-    updateGutter();
-    updateTintMarkers();
-  }
-
-  if (dom.editorTabs) {
-    dom.editorTabs.replaceChildren();
-    // One tab per open document, in the order they were opened. Each tab keeps
-    // its own surface, so selecting one is a switch rather than a reload.
-    for (const path of session.order) {
-      const item = session.docs.get(path);
+    const tabs = pane.tabsEl;
+    if (!tabs) {
+      return;
+    }
+    tabs.replaceChildren();
+    const pinnedSide = () => (splitPanes ? pane.side : null);
+    for (const key of pane.order) {
+      const path = pathFromTabKey(key);
+      const item = path ? session.docs.get(path) : null;
       if (!item) {
         continue;
       }
       const isActive = path === session.openPath;
       const surface = item.view || (item.kind === "script" ? "code" : item.kind);
-      dom.editorTabs.append(
+      tabs.append(
         createTab({
           label: path,
           kind: surface === "audio" ? "audioEdit" : surface,
-          // While a key frame is being edited the stage belongs to that tab, so
-          // the document behind it does not claim the highlight.
-          // The reader likewise owns the editor area while it is open.
           active: !reading && isActive && !keyEditing && (surface === "code" ? !showStage : true),
           dirty: isActive ? isEditorDirty() : isDocDirty(item),
           onSelect: () => {
-            void openFile(path);
+            void openFile(path, { pane });
           },
           onClose: () => {
-            void closeFile(path);
+            void closeFile(path, pane);
           },
+          paneId: pane.id,
+          tabKey: key,
+          pinnedSide: pinnedSide(),
         }),
       );
     }
-    // The key frame file is a tab of its own, named after the file rather than
-    // the object: that is what the author opened and what the script names.
-    if (session.keyFile) {
-      dom.editorTabs.append(
+    if (pane.order.includes(keyframesTabKey()) && pane.keyFile) {
+      const keyFile = pane.keyFile;
+      tabs.append(
         createTab({
-          label: session.keyFile.path,
+          label: keyFile.path,
           kind: "keyframes",
           active: showStage && keyEditing,
           dirty: Boolean(pathEditor?.isDirty()),
           onSelect: () => {
+            if (pane !== activePane) {
+              focusPane(pane);
+            }
             if (!pathEditor?.isOpen()) {
-              // brought back after a trip): opening the file again rebuilds it
-              // over the scene the key plays on, exactly as the first time.
-              openPathEditor(session.keyFile.path, {
-                objectName: session.keyFile.objectName,
-                scriptPath: session.keyFile.scriptPath,
-                call: session.keyFile.call,
+              openPathEditor(keyFile.path, {
+                objectName: keyFile.objectName,
+                scriptPath: keyFile.scriptPath,
+                call: keyFile.call,
               }).catch((error) => setMessage(describeError(error), { error: true }));
               return;
             }
             session.view = "stage";
             refreshEditor();
           },
-          onClose: () => {
-            // Closing the tab is the one way to drop the animation's tab: the
-            // back button keeps it, so coming back to it is always possible.
-            if (pathEditor?.isDirty()) {
-              pathEditor
-                .save()
-                .catch((error) =>
-                  setMessage(`保存关键帧失败：${describeError(error)}`, { error: true }),
-                );
-            }
-            pathEditor?.close();
-            session.keyFile = null;
-            session.view = "code";
-            refreshEditor();
-          },
+          onClose: () => closeKeyframesTab(pane),
+          paneId: pane.id,
+          tabKey: keyframesTabKey(),
+          pinnedSide: pinnedSide(),
         }),
       );
     }
-    if (hasFile && session.stageName && !keyEditing) {
-      dom.editorTabs.append(
+    if (pane.order.includes(stageTabKey()) && session.stageName && !keyEditing) {
+      tabs.append(
         createTab({
           label: session.stageName,
           kind: "stage",
           active: showStage && !reading,
-          onSelect: showStageView,
-          onClose: closeStage,
+          onSelect: () => {
+            if (pane !== activePane) {
+              focusPane(pane);
+            }
+            showStageView();
+          },
+          onClose: () => closeStage(),
+          paneId: pane.id,
+          tabKey: stageTabKey(),
+          pinnedSide: pinnedSide(),
         }),
       );
     }
-    // The reader is a tab like a document is — it can be left by switching to
-    // another tab and returned to from its own. It carries the article's name,
-    // since that is what is on screen.
-    if (reading) {
-      dom.editorTabs.append(
+    // The reader is a tab like any other: switching away leaves it on the strip
+    // and clicking it comes back to the same article.
+    if (pane.order.includes(readerTabKey())) {
+      const article = pane.reader ?? { setName: "help", articleId: "" };
+      tabs.append(
         createTab({
-          label: readerPanel.label(),
+          label: readerPanel.label(pane) || "帮助",
           kind: "reader",
-          active: true,
-          onSelect: () => readerPanel.open(session.reader.setName, session.reader.articleId),
-          onClose: () => readerPanel.close(),
+          active: reading,
+          onSelect: () => readerPanel.open(article.setName, article.articleId, pane),
+          onClose: () => readerPanel.close(pane),
+          paneId: pane.id,
+          tabKey: readerTabKey(),
+          pinnedSide: pinnedSide(),
         }),
       );
+    }
+  });
+}
+
+function refreshEditor() {
+  refreshRunButton();
+  if (!panes[0].dom?.editorText || !panes[0].dom?.editorEmpty) {
+    return;
+  }
+  // Direct writes to the session aliases are common; fold them into the pane
+  // before repainting so the other pane cannot overwrite them.
+  captureActiveState();
+  // An editor group with no tabs is no longer a group: close the split before
+  // painting, so no empty surface is ever shown.
+  if (splitPanes && panes.some((pane) => pane.order.length === 0)) {
+    collapseSplit();
+  }
+  for (const pane of panes) {
+    renderPane(pane);
+  }
+  // A pane's article belongs to that pane alone. The aliases used while
+  // rendering can end up pointing at the other pane's view, so settle every
+  // reader here rather than leaving a second page stacked under the editor.
+  for (const pane of panes) {
+    if (pane.dom?.readerView) {
+      pane.dom.readerView.hidden = !pane.readerActive;
     }
   }
-
   refreshStatus();
   refreshMenuContext();
+}
+
+/** Drops a key frame tab without taking the scene it played on with it. */
+function closeKeyframesTab(pane) {
+  if (pane.keyFile && pathEditor?.isDirty()) {
+    pathEditor
+      .save()
+      .catch((error) => setMessage(`保存关键帧失败：${describeError(error)}`, { error: true }));
+  }
+  pathEditor?.close();
+  removeTabEverywhere(keyframesTabKey());
+  pane.keyFile = null;
+  if (pane === activePane) {
+    session.keyFile = null;
+    session.view = "code";
+  }
+  refreshEditor();
 }
 
 /** Brings the editor forward, leaving a running stage alive in its own tab. */
@@ -1471,6 +1758,135 @@ function scheduleEditorRepaint() {
       }
     }
   });
+}
+
+/**
+ * 记住一次编辑前的滚动量，并在编辑引起浏览器乱滚时按回去。
+ *
+ * WebView2 在回车/退格增删行、IME 合成上屏时会把编辑区连带滚走，哪怕光标
+ * 本来就在视野内：一段写到一半的脚本会突然从眼前消失。浏览器是在输入事件
+ * 之后滚的，事件里直接改 `scrollTop` 无效，只能等 `scroll` 到达时纠正。
+ * 只有光标仍落在编辑前那个视野里才纠正；真的跑出视野时照旧带它入画。
+ *
+ * @param {HTMLTextAreaElement} textarea
+ * @returns {() => void} 在 textarea 的 scroll 事件里调用。
+ */
+function guardEditorScrollOnEdit(textarea) {
+  let saved = null;
+  let armed = false;
+  let composing = false;
+  let releaseTimer = 0;
+  let maxTimer = 0;
+
+  const disarm = () => {
+    clearTimeout(releaseTimer);
+    clearTimeout(maxTimer);
+    armed = false;
+    saved = null;
+  };
+  const arm = () => {
+    if (!armed) {
+      saved = textarea.scrollTop;
+      armed = true;
+    }
+    clearTimeout(maxTimer);
+    maxTimer = setTimeout(() => {
+      if (!composing) {
+        disarm();
+      }
+    }, 1000);
+  };
+  const release = () => {
+    clearTimeout(releaseTimer);
+    // 合成上屏之后浏览器还会再滚一次，晚一点才解除保护。
+    releaseTimer = setTimeout(disarm, 150);
+  };
+
+  textarea.addEventListener(
+    "keydown",
+    (event) => {
+      if (event.ctrlKey || event.metaKey || event.altKey) {
+        return;
+      }
+      if (event.key === "Enter" || event.key === "Backspace" || event.key === "Delete" || event.key.length === 1) {
+        arm();
+      }
+    },
+    true,
+  );
+  textarea.addEventListener(
+    "compositionstart",
+    () => {
+      composing = true;
+      saved = textarea.scrollTop;
+      armed = true;
+      clearTimeout(maxTimer);
+    },
+    true,
+  );
+  textarea.addEventListener(
+    "beforeinput",
+    (event) => {
+      if (!event.isComposing) {
+        arm();
+      }
+    },
+    true,
+  );
+  textarea.addEventListener(
+    "input",
+    (event) => {
+      if (!event.isComposing) {
+        release();
+      }
+    },
+    true,
+  );
+  textarea.addEventListener(
+    "compositionend",
+    () => {
+      composing = false;
+      release();
+    },
+    true,
+  );
+  // 用户主动滚动时不再纠正，否则一次滚轮会被当成编辑的余波按回去。
+  textarea.addEventListener("wheel", disarm, { capture: true, passive: true });
+  textarea.addEventListener(
+    "pointerdown",
+    () => {
+      if (!composing) {
+        disarm();
+      }
+    },
+    { capture: true, passive: true },
+  );
+
+  return () => {
+    if (!armed || saved == null || textarea.scrollTop === saved) {
+      return;
+    }
+    if (!caretWithinScroll(textarea, saved)) {
+      return;
+    }
+    textarea.scrollTop = saved;
+  };
+}
+
+/** 光标所在行是否落在 `scrollTop` 对应的视野里。 */
+function caretWithinScroll(textarea, scrollTop) {
+  const styles = getComputedStyle(textarea);
+  const lineHeight = Number.parseFloat(styles.lineHeight) || 20.8;
+  const padTop = Number.parseFloat(styles.paddingTop) || 12;
+  const upto = textarea.value.slice(0, textarea.selectionStart ?? 0);
+  let line = 0;
+  for (let index = 0; index < upto.length; index += 1) {
+    if (upto.charCodeAt(index) === 10) {
+      line += 1;
+    }
+  }
+  const top = padTop + line * lineHeight;
+  return top >= scrollTop && top + lineHeight <= scrollTop + textarea.clientHeight;
 }
 
 /**
@@ -2109,16 +2525,28 @@ function parseDialog(contents) {
 }
 
 /** Loads a script or a style file from disk into its own surface. */
-async function openFile(path) {
+async function openFile(path, { pane = activePane } = {}) {
   if (!session.project || !dom.editorText) {
     return;
   }
-  // Opening a file is leaving the reader: the tab is what the author asked for,
-  // and the article would otherwise keep covering it. The editor is repainted
-  // here as well as by the branches below: re-opening the file that is already
-  // in the editor returns early from `surfaceFor`, and the article must not stay
-  // on top of it.
-  readerPanel.leave();
+  // A tab clicked in the other pane belongs to that pane; switching focus keeps
+  // the previously focused document's caret and scroll in its own record.
+  if (pane !== activePane) {
+    focusPane(pane);
+  }
+  // Opening a file is leaving the reader in this pane. The article's tab stays
+  // on the strip, so coming back to it is a tab switch rather than a reopen.
+  readerPanel.leave({ pane });
+  const key = docTabKey(path);
+  const from = panes.find((item) => item !== pane && item.order.includes(key));
+  if (from) {
+    withPane(from, () => {
+      if (from.openPath === path) {
+        stashActive();
+      }
+    });
+    moveTabToPane(key, pane);
+  }
   if (session.openPath === path) {
     // Re-opening the current file brings its surface forward instead of doing
     // nothing, so the tree doubles as a way back from the stage.
@@ -2349,19 +2777,22 @@ function clearImage() {
  *
  * @param {string} [path] The document to close; defaults to the active one.
  */
-async function closeFile(path = session.openPath) {
+async function closeFile(path = session.openPath, pane = activePane) {
   const doc = session.docs.get(path);
   if (!doc) {
     return;
   }
-  const isActive = path === session.openPath;
-  const dirty = isActive ? isEditorDirty() : isDocDirty(doc);
+  const key = docTabKey(path);
+  const owner = panes.find((item) => item.order.includes(key)) ?? pane;
+  const isActive = owner.openPath === path;
+  const dirty = withPane(owner, () => (isActive ? isEditorDirty() : isDocDirty(doc)));
   if (dirty && !(await confirmDiscard(path))) {
     return;
   }
 
-  const index = session.order.indexOf(path);
-  session.order = session.order.filter((item) => item !== path);
+  const index = owner.order.indexOf(key);
+  owner.order = owner.order.filter((item) => item !== key);
+  syncPaneOrder();
   session.docs.delete(path);
   disposeDoc(doc);
 
@@ -2370,22 +2801,29 @@ async function closeFile(path = session.openPath) {
     return;
   }
 
-  discardStage();
-  const next = session.order[index] ?? session.order[index - 1] ?? null;
-  session.openPath = null;
-  session.savedText = "";
-  session.savedJson = "";
-  syncEditors();
-  if (dom.editorText) {
-    dom.editorText.value = "";
-    updateHighlight();
-  }
-  clearImage();
-  if (next) {
-    const opened = activateDoc(next);
-    restoreDoc(opened);
-    surfaceFor(next);
-  }
+  const state = withPane(owner, () => {
+    discardStage();
+    const next =
+      pathFromTabKey(owner.order[index]) ?? pathFromTabKey(owner.order[index - 1]) ?? null;
+    session.openPath = null;
+    session.savedText = "";
+    session.savedJson = "";
+    syncEditors();
+    if (dom.editorText) {
+      dom.editorText.value = "";
+      updateHighlight();
+    }
+    clearImage();
+    if (next) {
+      const opened = activateDoc(next);
+      restoreDoc(opened);
+      surfaceFor(next);
+    }
+    return { openPath: session.openPath, savedText: session.savedText, savedJson: session.savedJson };
+  });
+  owner.openPath = state.openPath;
+  owner.savedText = state.savedText;
+  owner.savedJson = state.savedJson;
   refreshEditor();
 }
 
@@ -2909,6 +3347,7 @@ async function openPathEditor(file, where = {}) {
     objectName: where.objectName ?? key,
     call: where.call ?? null,
   };
+  addTabToPane(activePane, keyframesTabKey());
   // Opened after the editor is open: the stage is shown because the editor is,
   // so `refreshEditor` has to look at a state where it already is.
   session.view = "stage";
@@ -3298,6 +3737,7 @@ async function deleteCodeKeyFrame(call) {
   if (session.keyFile?.path === file) {
     pathEditor?.close();
     session.keyFile = null;
+    removeTabEverywhere(keyframesTabKey());
     session.view = "code";
   }
   try {
@@ -3665,16 +4105,21 @@ async function performScriptOnStage(source, { path, name, replay = null, fromDis
   // written: what a save fingerprints is the file, not the compiled form.
   const program = isMpePath(path) ? transpile(source) : source;
 
-  // `# debug::com.player.skip` asks for a run that starts fast-forwarded: the
+  // `# debug::com.player.start` asks for a run that starts fast-forwarded: the
   // script is performed from the top, but silently and without taking any time,
   // until the mark is reached — from there on it plays at normal pace. Whether
   // the mark is there has to be known before the first statement runs, so the
   // text is scanned first; only a marked script travels.
+  const commands = scanDebugCommands(program);
   const fastForward =
     !replay &&
-    scanDebugCommands(program).some(
-      (command) => command.target === "player" && command.command === "skip",
+    commands.some(
+      (command) => command.target === "player" && command.command === "start",
     );
+  // 这两条是开演前的开关，不是走到才触发的标记：autoShow 决定 enable 是否
+  // 顺带让对象入场，autoModify 让解释器在执行前裁剪失活对象后的无效代码。
+  const autoShowSetting = commands.find((command) => command.command === "autoShow");
+  const autoModify = commands.some((command) => command.command === "autoModify");
 
   // The manifest's typewriter mode is the run's fallback, not just what the
   // settings panel last picked: a project opened with 慢速 must play slowly
@@ -3690,6 +4135,7 @@ async function performScriptOnStage(source, { path, name, replay = null, fromDis
   const title = name ?? "演出";
   session.running = true;
   session.stageName = title;
+  addTabToPane(activePane, stageTabKey());
   session.view = "stage";
   session.root = path;
   session.node = null;
@@ -3812,6 +4258,19 @@ async function performScriptOnStage(source, { path, name, replay = null, fromDis
       // 起点就快进的那一趟：解释器在标记处转成常速，并在这里通知舞台。
       fastForward,
       stopped: () => token !== runCount,
+      // `# debug::com.audio.*Speed` 是走到才生效、可反复覆盖的基础倍率：
+      // 改的是舞台音频工厂，只有这条之后的 play / say 才按新倍率启动。
+      onDebug: (statement) => {
+        if (statement.target !== "audio") {
+          return null;
+        }
+        if (statement.command === "voiceSpeed") {
+          stage.setVoiceSpeed(statement.value);
+        } else if (statement.command === "audioSpeed") {
+          stage.setAudioSpeed(statement.value);
+        }
+        return null;
+      },
       // What a save is made of: the node the run stands on and the answers it
       // has taken. Both reach the editor from here; the stage never reads a
       // script position.
@@ -3825,6 +4284,10 @@ async function performScriptOnStage(source, { path, name, replay = null, fromDis
         session.choices.push({ key: nodeKey(answer.file, answer.path), picked: answer.picked });
       },
       replay,
+      // `# debug::com.enable.autoShow=0` 关掉 enable 自带的入场；默认开启。
+      autoShow: autoShowSetting ? autoShowSetting.autoShow : true,
+      // autoModify 在解析后、演出前标记无效语句与自动释放位置。
+      autoModify,
       onLive: () => {
         travelling = false;
         stage.setReplay(false);
@@ -3866,7 +4329,7 @@ async function performScriptOnStage(source, { path, name, replay = null, fromDis
     // The fast-forward never met its mark, so the whole run went by silently:
     // the mark sits in a branch this play-through does not take. Saying so is
     // the only thing that distinguishes it from a stage that refused to play.
-    setMessage("没有走到调试命令 # debug::com.player.skip 的位置，整段都没有显示", {
+    setMessage("没有走到调试命令 # debug::com.player.start 的位置，整段都没有显示", {
       error: true,
     });
     return;
@@ -3882,7 +4345,7 @@ async function performScriptOnStage(source, { path, name, replay = null, fromDis
     replay
       ? "已从存档继续"
       : fastForward
-        ? "已从调试命令 # debug::com.player.skip 处开始播放"
+        ? "已从调试命令 # debug::com.player.start 处开始播放"
         : `已运行 ${path ?? "脚本"}`,
   );
 }
@@ -4929,6 +5392,7 @@ function discardStage() {
     // The key frame tab goes with the stage it was drawn on: the editor's scene
     // is gone, so there is nothing left for the tab to show.
     session.keyFile = null;
+    removeTabEverywhere(keyframesTabKey());
     session.stageName = null;
     // Neither a style file nor an image has a text surface, so coming back from a
     // stage returns to its own surface rather than to a code editor that would
@@ -4976,12 +5440,9 @@ function closeStage() {
     setMessage(`关闭舞台时出错：${describeError(error)}`, { error: true });
   } finally {
     // A repaint can fail too when the stage's DOM is broken, and the tab strip
-    // is rebuilt near its end. Drop the stage tab node first so the click can
-    // never leave one behind; the strip is rebuilt from `session` on every
-    // repaint anyway, and a reset stage no longer produces a stage tab.
-    discardStageSafely(() =>
-      dom.editorTabs?.querySelectorAll(".tab--stage").forEach((tab) => tab.remove()),
-    );
+    // is rebuilt near its end. Drop the tab key first so the click can never
+    // leave one behind, whatever the repaint does.
+    removeTabEverywhere(stageTabKey());
     // The repaint normally hides the stage view, but it runs late in
     // `refreshEditor`; hiding it here means a broken repaint cannot leave the
     // scene on screen either.
@@ -5348,10 +5809,13 @@ async function refreshTree() {
   const gone = session.order.filter((path) => !findNode(project, path));
   for (const path of gone) {
     const doc = session.docs.get(path);
-    session.order = session.order.filter((item) => item !== path);
+    for (const pane of panes) {
+      pane.order = pane.order.filter((item) => item !== docTabKey(path));
+    }
     session.docs.delete(path);
     disposeDoc(doc);
   }
+  syncPaneOrder();
   if (gone.length && !session.docs.has(session.openPath)) {
     discardStage();
     session.openPath = null;
@@ -5363,7 +5827,8 @@ async function refreshTree() {
       updateHighlight();
     }
     clearImage();
-    const next = session.order[0] ?? null;
+    const next =
+      pathFromTabKey(activePane.order.find((key) => pathFromTabKey(key))) ?? null;
     if (next) {
       restoreDoc(activateDoc(next));
       surfaceFor(next);
@@ -5383,7 +5848,17 @@ function applyProject(project) {
     disposeDoc(doc);
   }
   session.docs.clear();
-  session.order = [];
+  for (const pane of panes) {
+    pane.order = [];
+    pane.openPath = null;
+    pane.reader = null;
+    pane.readerActive = false;
+    pane.keyFile = null;
+    pane.view = "code";
+    pane.savedText = "";
+    pane.savedJson = "";
+  }
+  syncPaneOrder();
   session.project = project ?? null;
   session.openPath = null;
   session.savedText = "";
@@ -5856,155 +6331,25 @@ function setupMenuBar() {
     }
   });
 
-  // Candidate suggestions while a script is typed. Accepting one rewrites the
-  // textarea directly, which fires no `input` event of its own, so the refresh
-  // the input handler performs is run for it as well.
-  if (dom.editorText) {
-    completion = createCompletion({
-      textarea: dom.editorText,
-      // A `.mpe` file writes `enable ch bg` with spaces where `.pe` writes
-      // `stage.enable(ch, bg)`, so the list needs the dialect to know which
-      // words are calls and which are objects.
-      isShorthand: () => isMpePath(session.openPath),
-      onChange: () => {
-        refreshStatus();
-        updateGutter();
-        updateTintMarkers();
-        updateHighlight();
-        syncHighlightScroll();
-      },
-    });
-
-    // One repaint per frame rather than one per keystroke; see
-    // `scheduleEditorRepaint` for what a burst of typing used to trigger.
-    dom.editorText.addEventListener("input", scheduleEditorRepaint);
-    dom.editorText.addEventListener("scroll", () => {
-      syncGutterScroll();
-      syncTintScroll();
-      syncHighlightScroll();
-      syncErrorScroll();
-      if (findBar.isOpen()) {
-        findBar.syncScroll();
-      }
-      // The list is pinned to a point on screen, so it has to be re-anchored
-      // when the text under it moves.
-      completion.reposition();
-    });
-    // Leaving the editor dismisses the list for good: a repaint still queued
-    // from the last keystroke must not open it again behind the user's back.
-    dom.editorText.addEventListener("blur", () => completion.dismiss());
-    dom.editorText.addEventListener("keydown", (event) => {
-      // The list owns Tab while it is up — the highlighted name is taken by it —
-      // so it answers first, and only a key it did not want reaches the editor.
-      if (completion.handleKey(event)) {
-        return;
-      }
-      // Ctrl+X / Ctrl+C act on the whole line when nothing is selected, the way
-      // a code editor does; with a selection they stay the webview's own copy
-      // and cut. Ctrl+D duplicates the line the caret sits on — or the block a
-      // selection covers — and leaves the caret on the copy.
-      const accel = (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey;
-      const key = String(event.key).toLowerCase();
-      if (accel && key === "d") {
-        event.preventDefault();
-        duplicateLineBlock(dom.editorText);
-        return;
-      }
-      // Ctrl+/ comments the lines the caret or selection covers, or takes the
-      // comments back off; the script's `//` is the marker it writes.
-      if (accel && key === "/") {
-        event.preventDefault();
-        toggleLineComment(dom.editorText);
-        return;
-      }
-      if (accel && (key === "x" || key === "c")) {
-        const textarea = dom.editorText;
-        if (textarea.selectionStart !== textarea.selectionEnd) {
-          return;
-        }
-        const block = lineBlockOf(textarea.value, textarea.selectionStart, textarea.selectionEnd);
-        const text = textarea.value.slice(block.from, block.to);
-        if (!text) {
-          return;
-        }
-        event.preventDefault();
-        // The line is only cut once the clipboard has it: a refused write must
-        // not take the author's text with it. If anything was typed while the
-        // write was in flight the block no longer matches and the cut is
-        // dropped rather than removing the wrong line.
-        void writeClipboardText(text, textarea).then((copied) => {
-          if (!copied) {
-            setMessage("没能写入剪贴板，内容未改动。", { error: true });
-            return;
-          }
-          if (key === "x" && textarea.value.slice(block.from, block.to) === text) {
-            removeLineBlock(textarea, block.from, block.to);
-          }
-        });
-        return;
-      }
-      if (event.key === "Tab") {
-        event.preventDefault();
-        if (event.shiftKey) {
-          outdentSelection(dom.editorText);
-        } else {
-          indentSelection(dom.editorText);
-        }
-      }
-    });
-
-    // Find / replace bar. Ctrl/Cmd+F opens it (or refocuses the field); Esc in
-    // the query closes it. The bar lives inside the editor pane, so it is only
-    // meaningful while the editor is on screen.
-    dom.editorFindInput.addEventListener("input", () => findBar.run());
-    dom.editorFindCase.addEventListener("change", () => findBar.run());
-    dom.editorFindRegex.addEventListener("change", () => findBar.run());
-    dom.editorFindPrev.addEventListener("click", () => findBar.navigate(-1));
-    dom.editorFindNext.addEventListener("click", () => findBar.navigate(1));
-    dom.editorFindReplaceOne.addEventListener("click", () => findBar.replaceCurrent());
-    dom.editorFindReplaceAll.addEventListener("click", () => findBar.replaceAll());
-    dom.editorFindClose.addEventListener("click", () => findBar.close());
-    dom.editorFindInput.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        findBar.navigate(event.shiftKey ? -1 : 1);
-      } else if (event.key === "Escape") {
-        event.preventDefault();
-        findBar.close();
-      }
-    });
-    dom.editorFindReplace.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        findBar.replaceCurrent();
-      }
-    });
-    document.addEventListener("keydown", (event) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
-        if (dom.editorCode && !dom.editorCode.hidden) {
-          event.preventDefault();
-          if (findBar.isOpen()) {
-            dom.editorFindInput.focus();
-            dom.editorFindInput.select();
-          } else {
-            findBar.open();
-          }
-        }
-      }
-    });
-
-    // The two faces are files, so they can arrive after the first layout has
-    // already been measured. Anything placed against the fallback face — the
-    // gutter, the coloured copy, the marks that follow the glyphs — is then off,
-    // so it is all repainted once the fonts are in.
-    document.fonts?.ready.then(() => {
-      updateGutter();
-      updateHighlight();
-      if (findBar.isOpen()) {
-        findBar.renderMarks();
-      }
-    });
+  // Suggestions, find/replace and the textarea's keystrokes belong to a pane,
+  // so each pane gets its own instances wired to its own DOM.
+  for (const pane of panes) {
+    wireEditorPane(pane);
   }
+  // Ctrl/Cmd+F targets whichever pane is focused.
+  document.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
+      if (dom.editorCode && !dom.editorCode.hidden) {
+        event.preventDefault();
+        if (findBar.isOpen()) {
+          dom.editorFindInput.focus();
+          dom.editorFindInput.select();
+        } else {
+          findBar.open();
+        }
+      }
+    }
+  });
 
   window.addEventListener("beforeunload", (event) => {
     // Every tab counts, not just the one in front: closing the window closes
@@ -6151,6 +6496,484 @@ function setupWindowChrome(app, titlebar, maximizeButton) {
   });
 }
 
+// --- editor panes ---
+
+/** Reads the pane-local DOM out of a cloned editor group. */
+function readPaneDom(root, suffix = "") {
+  const kebab = (name) => name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`);
+  const result = {};
+  for (const key of PANE_DOM_KEYS) {
+    result[key] = root.querySelector(`[id="${kebab(key)}${suffix}"]`) ?? null;
+  }
+  result.editorTint = root.querySelector(".editor__tint");
+  result.editorTintInner = root.querySelector(".editor__tint-inner");
+  result.editorCallHighlight = root.querySelector(".editor__call-highlight");
+  return result;
+}
+
+/**
+ * Creates the right-hand editor group the first time a tab is pinned there.
+ *
+ * The stage is a single surface shared by the whole window, so only its clone
+ * is dropped; every pane-local surface gets its own textarea, find bar and
+ * suggestion list.
+ */
+function ensureSecondaryPane() {
+  const existing = panes.find((pane) => pane.id === "secondary");
+  if (existing) {
+    return existing;
+  }
+  const host = document.getElementById("editor-panes");
+  const primaryElement = panes[0].element;
+  if (!host || !primaryElement) {
+    return null;
+  }
+  const element = primaryElement.cloneNode(true);
+  element.id = "editor-pane-secondary";
+  element.setAttribute("aria-label", "分屏编辑区");
+  element.querySelectorAll("[id]").forEach((node) => {
+    node.id = `${node.id}-split`;
+  });
+  element.querySelector(".stage")?.remove();
+  element
+    .querySelectorAll(".dialog-view,.graph-view,.image-edit,.audio-edit,.doc-view")
+    .forEach((node) => node.remove());
+  const tabs = element.querySelector(".tabs");
+  tabs?.replaceChildren();
+  const splitter = document.createElement("div");
+  splitter.className = "editor__splitter";
+  splitter.setAttribute("role", "separator");
+  splitter.tabIndex = 0;
+  splitter.title = "拖动调整宽度，双击恢复等宽";
+  host.append(splitter, element);
+  wireSplitter(splitter, host);
+
+  const pane = {
+    id: "secondary",
+    side: "right",
+    element,
+    surface: element.querySelector(".editor__surface"),
+    tabsEl: tabs,
+    dom: readPaneDom(element, "-split"),
+    order: [],
+    openPath: null,
+    view: "code",
+    reader: null,
+    readerActive: false,
+    keyFile: null,
+    savedText: "",
+    savedJson: "",
+    completion: null,
+    findBar: null,
+    gutterLines: 0,
+    tintText: null,
+    tintHost: null,
+    tintHidden: null,
+    findMarkText: null,
+  };
+  // The stage belongs to the window: the same node moves between surfaces.
+  pane.dom.stageView = dom.stageView;
+  pane.dom.stageSurface = dom.stageSurface;
+  panes.push(pane);
+  splitPanes = true;
+  host.classList.add("is-split");
+  wireEditorPane(pane);
+  return pane;
+}
+
+/** Collapses an empty split back into a single editor group. */
+function collapseSplit() {
+  const secondary = panes.find((pane) => pane.id === "secondary");
+  if (!secondary) {
+    return;
+  }
+  stashActive();
+  captureActiveState();
+  const keep = panes[0];
+  // If the left side emptied, the surviving tabs move into the left pane
+  // rather than disappearing with the right one.
+  if (!keep.order.length && secondary.order.length) {
+    for (const key of ["openPath", "view", "reader", "readerActive", "keyFile", "savedText", "savedJson"]) {
+      keep[key] = secondary[key];
+    }
+    keep.order = secondary.order;
+    for (const doc of session.docs.values()) {
+      if (doc.container?.parentElement === secondary.surface) {
+        keep.surface.append(doc.container);
+      }
+    }
+  }
+  if (activePane === secondary) {
+    activePane = keep;
+  }
+  secondary.completion?.dismiss();
+  secondary.findBar?.close();
+  secondary.element?.remove();
+  keep.element.style.flex = "";
+  document.querySelector(".editor__splitter")?.remove();
+  document.getElementById("editor-panes")?.classList.remove("is-split");
+  panes.splice(panes.indexOf(secondary), 1);
+  splitPanes = false;
+  applyPaneState(keep);
+}
+
+/** Makes the divider between the panes draggable and keyboard-adjustable. */
+function wireSplitter(splitter, host) {
+  const apply = (ratio) => {
+    const [left, right] = panes;
+    if (!left?.element || !right?.element) {
+      return;
+    }
+    const value = Math.max(0.2, Math.min(0.8, ratio));
+    splitter.dataset.ratio = String(value);
+    left.element.style.flex = `0 0 ${(value * 100).toFixed(2)}%`;
+    right.element.style.flex = "1 1 0";
+  };
+  const onMove = (event) => {
+    const rect = host.getBoundingClientRect();
+    if (rect.width > 0) {
+      apply((event.clientX - rect.left) / rect.width);
+    }
+  };
+  splitter.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    splitter.focus();
+    splitter.setPointerCapture(event.pointerId);
+    splitter.addEventListener("pointermove", onMove);
+  });
+  const stop = (event) => {
+    if (splitter.hasPointerCapture(event.pointerId)) {
+      splitter.releasePointerCapture(event.pointerId);
+    }
+    splitter.removeEventListener("pointermove", onMove);
+  };
+  splitter.addEventListener("pointerup", stop);
+  splitter.addEventListener("pointercancel", stop);
+  splitter.addEventListener("dblclick", () => apply(0.5));
+  splitter.addEventListener("keydown", (event) => {
+    const current = Number(splitter.dataset.ratio ?? 0.5);
+    const step = event.shiftKey ? 0.1 : 0.02;
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      event.preventDefault();
+      apply(current + (event.key === "ArrowLeft" ? -step : step));
+    } else if (event.key === "Home" || event.key === "End") {
+      event.preventDefault();
+      apply(event.key === "Home" ? 0.2 : 0.8);
+    }
+  });
+}
+
+/** Wires one pane's textarea, suggestion list and find bar. */
+function wireEditorPane(pane) {
+  const d = pane.dom;
+  if (!d?.editorText) {
+    return;
+  }
+  const inPane = (fn) => withPane(pane, fn);
+
+  pane.completion = createCompletion({
+    textarea: d.editorText,
+    isShorthand: () => isMpePath(session.openPath),
+    onChange: () =>
+      inPane(() => {
+        refreshStatus();
+        updateGutter();
+        updateTintMarkers();
+        updateHighlight();
+        syncHighlightScroll();
+      }),
+  });
+  pane.findBar = createFindBar({ dom: d, editorRangeRect });
+  if (pane === activePane) {
+    completion = pane.completion;
+    findBar = pane.findBar;
+  }
+
+  // Clicking into either pane makes it the one the menus and shortcuts act on.
+  d.editorText.addEventListener("pointerdown", () => focusPane(pane));
+  d.editorText.addEventListener("keydown", (event) => {
+    if (event.ctrlKey && event.key.toLowerCase() === "s") {
+      event.preventDefault();
+      runCommand("file.save");
+    }
+  });
+  pane.surface?.addEventListener("pointerdown", (event) => {
+    if (!event.target.closest(".editor__text")) {
+      focusPane(pane);
+    }
+  });
+
+  const restoreEditScroll = guardEditorScrollOnEdit(d.editorText);
+  d.editorText.addEventListener("input", () => inPane(scheduleEditorRepaint));
+  d.editorText.addEventListener("scroll", () => {
+    restoreEditScroll();
+    inPane(() => {
+      syncGutterScroll();
+      syncTintScroll();
+      syncHighlightScroll();
+      syncErrorScroll();
+      if (findBar.isOpen()) {
+        findBar.syncScroll();
+      }
+      completion.reposition();
+    });
+  });
+  d.editorText.addEventListener("blur", () => pane.completion?.dismiss());
+  d.editorText.addEventListener("keydown", (event) =>
+    inPane(() => {
+      if (completion.handleKey(event)) {
+        return;
+      }
+      const accel = (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey;
+      const key = String(event.key).toLowerCase();
+      if (accel && key === "d") {
+        event.preventDefault();
+        duplicateLineBlock(d.editorText);
+        return;
+      }
+      if (accel && key === "/") {
+        event.preventDefault();
+        toggleLineComment(d.editorText);
+        return;
+      }
+      if (accel && (key === "x" || key === "c")) {
+        const textarea = d.editorText;
+        if (textarea.selectionStart !== textarea.selectionEnd) {
+          return;
+        }
+        const block = lineBlockOf(textarea.value, textarea.selectionStart, textarea.selectionEnd);
+        const text = textarea.value.slice(block.from, block.to);
+        if (!text) {
+          return;
+        }
+        event.preventDefault();
+        void writeClipboardText(text, textarea).then((copied) => {
+          if (!copied) {
+            setMessage("没能写入剪贴板，内容未改动。", { error: true });
+            return;
+          }
+          if (key === "x" && textarea.value.slice(block.from, block.to) === text) {
+            removeLineBlock(textarea, block.from, block.to);
+          }
+        });
+        return;
+      }
+      if (event.key === "Tab") {
+        event.preventDefault();
+        if (event.shiftKey) {
+          outdentSelection(d.editorText);
+        } else {
+          indentSelection(d.editorText);
+        }
+      }
+    }),
+  );
+
+  // Dragged file names land in the textarea under the pointer.
+  d.editorCode?.addEventListener("dragover", (event) =>
+    inPane(() => {
+      if (hasPlainText(event)) {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+        highlightDropCall(event);
+      } else {
+        clearDropCall();
+      }
+    }),
+  );
+  d.editorCode?.addEventListener("dragleave", (event) =>
+    inPane(() => {
+      if (!event.relatedTarget || !d.editorCode.contains(event.relatedTarget)) {
+        clearDropCall();
+      }
+    }),
+  );
+  d.editorCode?.addEventListener("drop", (event) =>
+    inPane(() => {
+      clearDropCall();
+      const path = event.dataTransfer?.getData("text/plain") || event.dataTransfer?.getData("text");
+      if (!path) {
+        return;
+      }
+      event.preventDefault();
+      if (!insertArgumentAtCall(path, event)) {
+        insertTextAtDrop(path, event);
+      }
+    }),
+  );
+
+  const bar = pane.findBar;
+  d.editorFindInput?.addEventListener("input", () => inPane(() => bar.run()));
+  d.editorFindCase?.addEventListener("change", () => inPane(() => bar.run()));
+  d.editorFindRegex?.addEventListener("change", () => inPane(() => bar.run()));
+  d.editorFindPrev?.addEventListener("click", () => inPane(() => bar.navigate(-1)));
+  d.editorFindNext?.addEventListener("click", () => inPane(() => bar.navigate(1)));
+  d.editorFindReplaceOne?.addEventListener("click", () => inPane(() => bar.replaceCurrent()));
+  d.editorFindReplaceAll?.addEventListener("click", () => inPane(() => bar.replaceAll()));
+  d.editorFindClose?.addEventListener("click", () => inPane(() => bar.close()));
+  d.editorFindInput?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      inPane(() => bar.navigate(event.shiftKey ? -1 : 1));
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      inPane(() => bar.close());
+    }
+  });
+  d.editorFindReplace?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      inPane(() => bar.replaceCurrent());
+    }
+  });
+  document.fonts?.ready.then(() =>
+    inPane(() => {
+      updateGutter();
+      updateHighlight();
+      if (findBar.isOpen()) {
+        findBar.renderMarks();
+      }
+    }),
+  );
+}
+
+/** Pins a tab to a side, moving it into that pane and splitting if needed. */
+function pinTab(pane, key, side) {
+  if (!key) {
+    return;
+  }
+  const target = side === "left" ? panes[0] : (ensureSecondaryPane() ?? panes[0]);
+  stashActive();
+  captureActiveState();
+  if (target !== pane) {
+    const from = panes.find((item) => item.order.includes(key));
+    if (from) {
+      from.order = from.order.filter((item) => item !== key);
+    }
+    addTabToPane(target, key);
+    // A pinned document is also the active one in its new pane.
+    const path = pathFromTabKey(key);
+    if (path) {
+      const doc = session.docs.get(path);
+      if (doc) {
+        target.openPath = path;
+        target.view = doc.view || "code";
+        target.savedText = doc.savedText;
+        target.savedJson = doc.savedJson;
+      }
+    } else if (key === readerTabKey()) {
+      target.reader = pane.reader;
+      target.readerActive = pane.readerActive;
+      pane.reader = null;
+      pane.readerActive = false;
+    } else if (key === keyframesTabKey()) {
+      target.keyFile = pane.keyFile;
+      pane.keyFile = null;
+    }
+  }
+  activePane = target;
+  applyPaneState(target);
+  const doc = activeDoc();
+  if (doc) {
+    restoreDoc(doc);
+  }
+  // An empty pane after a move means there is nothing left to split for.
+  const empty = panes.find((item) => item !== panes[0] && item.order.length === 0);
+  if (empty) {
+    collapseSplit();
+  }
+  refreshEditor();
+}
+
+/** The four commands on a tab's context menu. */
+async function onTabContextMenu(detail, tab) {
+  const pane = panes.find((item) => item.id === tab.dataset.pane) ?? paneForTarget(tab);
+  const key = tab.dataset.tab ?? "";
+  const command = await openContextMenu({
+    x: detail.x,
+    y: detail.y,
+    items: [
+      { label: "关闭当前页", command: "tab.close" },
+      { label: "关闭所有标签页", command: "tab.closeAll" },
+      { separator: true },
+      { label: "固定在左侧", command: "tab.pinLeft" },
+      { label: "固定在右侧", command: "tab.pinRight" },
+    ],
+  });
+  if (!command) {
+    return;
+  }
+  if (command === "tab.pinLeft" || command === "tab.pinRight") {
+    pinTab(pane, key, command === "tab.pinLeft" ? "left" : "right");
+    return;
+  }
+  if (command === "tab.closeAll") {
+    await closeAllTabs();
+    return;
+  }
+  if (pane !== activePane) {
+    focusPane(pane);
+  }
+  const path = pathFromTabKey(key);
+  if (path) {
+    await closeFile(path, pane);
+  } else if (key === readerTabKey()) {
+    readerPanel.close(pane);
+  } else if (key === keyframesTabKey()) {
+    closeKeyframesTab(pane);
+  } else if (key === stageTabKey()) {
+    closeStage();
+  }
+}
+
+/** Closes every tab, including the help tab, after the usual dirty checks. */
+async function closeAllTabs() {
+  if (!(await confirmCloseAll())) {
+    return;
+  }
+  if (pathEditor?.isDirty()) {
+    try {
+      await pathEditor.save();
+    } catch (error) {
+      setMessage(`保存关键帧失败：${describeError(error)}`, { error: true });
+      return;
+    }
+  }
+  pathEditor?.close();
+  for (const doc of session.docs.values()) {
+    disposeDoc(doc);
+  }
+  session.docs.clear();
+  discardStage();
+  clearImage();
+  if (dom.editorText) {
+    dom.editorText.value = "";
+  }
+  for (const pane of panes) {
+    pane.order = [];
+    pane.openPath = null;
+    pane.reader = null;
+    pane.readerActive = false;
+    pane.keyFile = null;
+    pane.view = "code";
+    pane.savedText = "";
+    pane.savedJson = "";
+  }
+  session.openPath = null;
+  session.reader = null;
+  session.keyFile = null;
+  session.view = "code";
+  session.savedText = "";
+  session.savedJson = "";
+  session.stageName = null;
+  syncPaneOrder();
+  if (splitPanes) {
+    collapseSplit();
+  }
+  refreshResourcePanel();
+  refreshEditor();
+}
+
 // --- bootstrap ---
 
 function main() {
@@ -6165,10 +6988,11 @@ function main() {
 
   dom.menubar = document.getElementById("menubar");
   dom.resourceBody = document.getElementById("resource-body");
-  // The heading and the rescan button change with the panel's contents: 资源
+  // The heading and the header buttons change with the panel's contents: 资源
   // with a project tree, 目录 with the reader's table of contents.
   dom.resourceTitle = document.getElementById("resource-title");
   dom.resourceRefresh = document.getElementById("resource-refresh");
+  dom.resourceReveal = document.getElementById("resource-reveal");
   attachResourceShortcuts();
   dom.resourceMeta = document.getElementById("resource-meta");
   dom.editorTabs = document.getElementById("editor-tabs");
@@ -6211,41 +7035,12 @@ function main() {
   dom.editorCallHighlight.hidden = true;
   dom.editorPane.append(dom.editorCallHighlight);
 
-  // A file dragged from the resource tree lands on the line it was dropped on;
-  // an empty `Character`/`Background` argument takes the asset path.
-  dom.editorCode.addEventListener("dragover", (event) => {
-    if (hasPlainText(event)) {
-      event.preventDefault();
-      event.dataTransfer.dropEffect = "copy";
-      highlightDropCall(event);
-    } else {
-      clearDropCall();
-    }
-  });
-  dom.editorCode.addEventListener("dragleave", (event) => {
-    // `dragleave` fires when the pointer crosses into a child too; only clear
-    // once the pointer is really gone from the editor.
-    if (!event.relatedTarget || !dom.editorCode.contains(event.relatedTarget)) {
-      clearDropCall();
-    }
-  });
-  dom.editorCode.addEventListener("drop", (event) => {
-    // `text` is the fallback name for the same payload: a build that reports the
-    // drag under one name may hand it back under the other.
-    clearDropCall();
-    const path = event.dataTransfer?.getData("text/plain") || event.dataTransfer?.getData("text");
-    if (!path) {
-      return;
-    }
-    event.preventDefault();
-    // A drop aimed at a call joins its arguments, wherever on the call it landed;
-    // anywhere else the name is written in at the pointer.
-    if (insertArgumentAtCall(path, event)) {
-      return;
-    }
-    insertTextAtDrop(path, event);
-  });
   dom.editorEmpty = document.getElementById("editor-empty");
+  // The primary pane borrows the window's DOM until a second pane is created.
+  panes[0].element = document.getElementById("editor-pane-primary");
+  panes[0].surface = document.getElementById("editor-surface");
+  panes[0].tabsEl = dom.editorTabs;
+  panes[0].dom = Object.fromEntries(PANE_DOM_KEYS.map((key) => [key, dom[key]]));
   dom.stageView = document.getElementById("stage-view");
   dom.stageSurface = document.getElementById("stage-surface");
 
@@ -6334,15 +7129,7 @@ function main() {
 
   resourcePreview.wire();
   wireResourceRefresh();
-
-  // A save shortcut inside the textarea must reach the global handler, so the
-  // browser's own handling is suppressed there.
-  dom.editorText?.addEventListener("keydown", (event) => {
-    if (event.ctrlKey && event.key.toLowerCase() === "s") {
-      event.preventDefault();
-      runCommand("file.save");
-    }
-  });
+  wireResourceReveal();
 
   // The window is an application frame, not a web page: the webview's own
   // shortcuts are swallowed rather than acting on the editor.
@@ -6398,12 +7185,13 @@ function main() {
     );
   });
 
-  // The in-app menu for the resource panel; the event above carries the target
-  // and pointer position, so this listener stays free of DOM lookups.
+  // Tabs have their own menu; the editor and the resource tree keep theirs.
   window.addEventListener("pamela:contextmenu", (event) => {
-    // A move under the pointer in the script editor gets its own menu; anything
-    // else falls through to the resource panel's, which is what the event was
-    // originally for.
+    const tab = event.detail.target?.closest?.(".tab");
+    if (tab) {
+      void onTabContextMenu(event.detail, tab);
+      return;
+    }
     if (onEditorKeyContextMenu(event.detail)) {
       return;
     }

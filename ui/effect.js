@@ -1,6 +1,7 @@
 // 舞台内置特效：rain 下雨、snow 下雪，两套粒子天气。
 // Pamela — built-in stage effects drawn by the engine, not loaded from assets.
 // 特效不从 assets 读文件，第一个参数就是特效名；画面由引擎自己画在 canvas 上。
+import { OBJECT_DESTROY } from "./pamela.js";
 
 /** 目前内置的特效名。引擎自己实现，新增一个只要在这里与 draw / tick 里加一支。 */
 export const EFFECT_KINDS = Object.freeze(["rain", "snow"]);
@@ -313,7 +314,7 @@ export function createEffectFactory({
     const effect = {
       kind: "Effect",
       /** Mounts the canvas, resets the particles and starts playing. */
-      enable() {
+      enable(time = 0) {
         // A retired effect (its variable was rebuilt, or the stage was cleared)
         // must not draw a canvas the factory no longer knows how to stop.
         if (retired) {
@@ -321,21 +322,47 @@ export function createEffectFactory({
         }
         particles = [];
         syncParticles();
-        state.opacity = 1;
+        // enable 自带 show：从透明开始，图就绪后淡到 1。`autoShow=0` 只让它
+        // 活跃，后续 show 才露面。
+        state.opacity = 0;
         if (!state.enabled) {
           state.enabled = true;
           layer?.append?.(canvas);
         }
         paint();
         startLoop();
+        if (context.autoShow !== false) {
+          tween(0, 1, time, (at) => {
+            state.opacity = at;
+            paint();
+          }, context, runningTweens);
+        }
         return effect;
       },
-      /** Unmounts the canvas and stops the frame loop. */
-      disable() {
-        stopLoop();
-        state.enabled = false;
-        drop(canvas);
+      /** Fades out, then unmounts the canvas and stops the frame loop. */
+      disable(time = 0) {
+        const finish = () => {
+          stopLoop();
+          state.enabled = false;
+          drop(canvas);
+        };
+        const span = Math.max(0, Number(time) || 0);
+        if (span > 0 && state.enabled) {
+          const fade = tween(state.opacity, 0, span, (at) => {
+            state.opacity = at;
+            paint();
+          }, context, runningTweens);
+          if (fade?.then) {
+            fade.then(finish);
+            return effect;
+          }
+        }
+        finish();
         return effect;
+      },
+      /** `del fx`：停下帧循环、断开 canvas 并放下槽位。 */
+      [OBJECT_DESTROY]() {
+        retire();
       },
       /** Resumes from wherever the animation was paused. */
       play() {

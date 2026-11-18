@@ -2,6 +2,8 @@
 // Pamela — video on the stage, with two control sub-tracks.
 // 两轨是门面而非两条独立时间轴：共用一个元素，音画永远同步。
 
+import { OBJECT_DESTROY } from "./pamela.js";
+
 import {
   addTint,
   clampChannel,
@@ -90,6 +92,7 @@ function rate(value) {
  * @param {() => boolean} [options.isPreviewing]
  * @param {() => boolean} [options.perspective] 舞台是否开着透视；关着时按正交
  *   投影摆放画面，深度不改变大小。
+ * @param {() => object} [options.camera] 当前取景的相机；缺省是内置固定相机。
  * @param {(message: string) => void} [options.onError]
  * @returns {((args: unknown[], context: object) => object) & {
  *   clear: () => void, pauseAll: () => void, repaint: () => void }}
@@ -101,6 +104,7 @@ export function createVideoFactory({
   isReplaying = () => false,
   isPreviewing = () => false,
   perspective = () => false,
+  camera = () => undefined,
   onError = () => {},
 } = {}) {
   const slots = new Map();
@@ -289,7 +293,10 @@ export function createVideoFactory({
 
     /** 这段画面此刻投到舞台上的姿态（中心、四角与是否躺在 W 面里）。 */
     const poseOf = () =>
-      projectPose(frame, { w: width, h: height }, { perspective: perspective() });
+      projectPose(frame, { w: width, h: height }, {
+        perspective: perspective(),
+        camera: camera(),
+      });
 
     /**
      * 整条 `transform`：躺着时是转+缩，转出 W 面之后是整次投影。
@@ -299,7 +306,9 @@ export function createVideoFactory({
      */
     const poseTransform = () => {
       const pose = poseOf();
-      if (pose.flat) {
+      const view = camera();
+      const distorted = Boolean(view?.k1 || view?.k2);
+      if (pose.flat && !distorted) {
         const flat = pose.center.scale;
         return `translate(-50%, -50%) rotate(${frame.rotation}deg) scale(${frame.scale * flat})`;
       }
@@ -716,19 +725,46 @@ export function createVideoFactory({
       slot,
       media,
       audio,
-      /** Restarts from the beginning and enables both tracks. */
-      enable() {
+      /** Restarts from the beginning and fades the picture in. */
+      enable(time = 0) {
         media.enable();
         audio.enable();
+        // 与图片一样：enable 自带 show；autoShow=0 时只激活，由 show 决定露面。
+        setFrame({ opacity: 0 }, 0);
+        if (context.autoShow !== false) {
+          glide(0, 1, time, (at) => setFrame({ opacity: at }, 0), context, runningGlides);
+        }
         start(true);
         return video;
       },
-      /** Stops, hides the picture and silences the audio track. */
-      disable() {
-        freeze();
-        media.disable();
-        audio.disable();
+      /** Fades out, then stops and silences both tracks. */
+      disable(time = 0) {
+        const finish = () => {
+          freeze();
+          media.disable();
+          audio.disable();
+        };
+        const span = Math.max(0, Number(time) || 0);
+        if (span > 0) {
+          const fade = glide(
+            frame.opacity ?? 1,
+            0,
+            span,
+            (at) => setFrame({ opacity: at }, 0),
+            context,
+            runningGlides,
+          );
+          if (fade?.then) {
+            fade.then(finish);
+            return video;
+          }
+        }
+        finish();
         return video;
+      },
+      /** `del v`：停播、丢弃元素与滤镜，放下槽位。 */
+      [OBJECT_DESTROY]() {
+        retire();
       },
       /** Plays from the current position. */
       play() {

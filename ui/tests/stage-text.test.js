@@ -132,6 +132,23 @@ test("a Text puts its words on the text layer", () => {
   });
 });
 
+test("a Text enabled with a duration fades in over that time", () => {
+  inFakeDom(() => {
+    const { stage, text } = domStage();
+    const title = createStageObjects(stage).Text(["字"], { assignee: "title" });
+
+    title.enable(2000);
+
+    const element = text.childNodes[0];
+    assert.equal(stage.textState("title").opacity, 1);
+    assert.equal(element.style.transition, "opacity 2000ms linear");
+    const firstOpacity = element.log.indexOf("style.opacity");
+    const layout = element.log.indexOf("layout");
+    assert.ok(firstOpacity >= 0 && firstOpacity < layout, "先把透明度压到 0 再读布局");
+    assert.ok(layout < element.log.lastIndexOf("style.opacity"), "再写最终透明度，过渡才有起点");
+  });
+});
+
 test("a Text shares move, turn, scale and fade with the pictures", () => {
   inFakeDom(() => {
     const { stage, text } = domStage();

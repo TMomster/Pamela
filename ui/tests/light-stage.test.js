@@ -88,6 +88,40 @@ function inFakeDom(body) {
   return result;
 }
 
+/** Runs `body` with the animation clock and frame queue under the test's control. */
+async function withManualFrames(body) {
+  const frames = [];
+  const previousFrame = globalThis.requestAnimationFrame;
+  const previousCancel = globalThis.cancelAnimationFrame;
+  const previousNow = Date.now;
+  let clock = 0;
+  globalThis.requestAnimationFrame = (run) => {
+    frames.push(run);
+    return frames.length;
+  };
+  globalThis.cancelAnimationFrame = () => {};
+  Date.now = () => clock;
+  const tick = (ms) => {
+    clock += ms;
+    for (const run of frames.splice(0)) {
+      run();
+    }
+  };
+  try {
+    return await body(tick);
+  } finally {
+    globalThis.requestAnimationFrame = previousFrame;
+    globalThis.cancelAnimationFrame = previousCancel;
+    Date.now = previousNow;
+  }
+}
+
+/** The authored brightness written into a picture's `filter`. */
+function brightnessOf(filter) {
+  const value = /brightness\(([\d.]+)\)/.exec(String(filter ?? ""))?.[1];
+  return value === undefined ? 1 : Number(value);
+}
+
 /** A stage built over a fake DOM, with the light layer picked out. */
 function domStage() {
   const surface = fakeElement();
@@ -230,6 +264,20 @@ test("the ambient brightness dims the pictures and never the dialogue box", () =
   });
 });
 
+test("a timed ambient change walks to the target and holds the script", async () => {
+  await inFakeDom(async () => {
+    const { stage, background } = domStage();
+
+    const waited = stage.setAmbient(0.4, 50);
+    assert.ok(waited && typeof waited.then === "function", "有时间时给出可等待的 Promise");
+    assert.equal(stage.getAmbient(), 0.4, "目标值立刻生效");
+    assert.equal(background.style.filter, "", "画面从当前亮度出发，不是一步跳过去");
+
+    await waited;
+    assert.equal(background.style.filter, "brightness(0.4)");
+  });
+});
+
 test("exclude names both lists, and unexclude takes it back", () => {
   inFakeDom(() => {
     const { stage } = domStage();
@@ -278,6 +326,26 @@ test("translucent 让光穿过一个对象，灯层读到的剪影跟着变", ()
 
     hero.translucent(false);
     assert.equal(heroSilhouette().cast, true, "写回 false 就恢复挡光");
+  });
+});
+
+test("hide 背景之后，灯层不再拿着看不见的背景", () => {
+  inFakeDom(() => {
+    const { stage } = domStage();
+    const objects = createStageObjects(stage);
+    objects.Light([], { assignee: "lamp" }).enable();
+    const bg = objects.Background(["bg.png"], { assignee: "bg" });
+    bg.enable();
+
+    const backgroundInLight = () => stage.lightObjects().some((item) => item.key === "background");
+    assert.equal(backgroundInLight(), true, "可见背景要参与按像素提亮");
+
+    bg.hide();
+    assert.equal(bg.opacity, 0);
+    assert.equal(backgroundInLight(), false, "hide 只把透明度写成 0，灯层不能照出旧背景");
+
+    bg.show();
+    assert.equal(backgroundInLight(), true, "重新显示后背景回到灯层对象表");
   });
 });
 
@@ -548,6 +616,78 @@ test("a lamp behind leaves a broken-down brightness that still respects the look
     const filter = character.childNodes[0].style.filter;
     const brightness = Number(/brightness\(([\d.]+)\)/.exec(filter)?.[1]);
     assert.ok(brightness > 0 && brightness < 0.8, `应当是 0.8 与逆光系数的乘积，实际 ${filter}`);
+  });
+});
+
+test("a walking character's shade is sampled at each frame, not at the destination", async () => {
+  await withManualFrames(async (tick) => {
+    await inFakeDom(async () => {
+      const { stage, character } = domStage();
+      const objects = createStageObjects(stage);
+      const lamp = objects.Light(["FFFFFF", 1], { assignee: "lamp" });
+      const hero = objects.Character(["hero.png"], { assignee: "hero" });
+      hero.scale(0.5).move(0, 0);
+      // 一盏正对镜头的逆光：角色走到光斑外就不该再有暗部。
+      lamp.spread(360).rotateH(90).zTo(500).enable();
+      hero.enable();
+      const image = character.childNodes[0];
+      const atStart = brightnessOf(image.style.filter);
+      assert.ok(atStart < 0.9, `起点该被压暗，实际 ${image.style.filter}`);
+
+      hero.move(2000, 0, null, 100);
+      assert.ok(
+        Math.abs(brightnessOf(image.style.filter) - atStart) < 0.01,
+        `移动的第一帧仍在起点，不该直接跳到终点：${image.style.filter}`,
+      );
+
+      tick(50);
+      const middle = brightnessOf(image.style.filter);
+      assert.ok(
+        middle > atStart && middle < 1,
+        `半程该按插值位置逐帧变亮，实际 ${image.style.filter}`,
+      );
+
+      tick(50);
+      assert.equal(brightnessOf(image.style.filter), 1, "走出光斑后不该再有暗部");
+
+      // 导出逐帧按 `t` 采样状态：中点这一帧用的就是「位置 = 1000」的静态状态。
+      // 把对象直接摆到同一个位置，舞台此刻的暗部必须与刚才的半程一致。
+      hero.moveTo(1000, 0);
+      assert.equal(
+        brightnessOf(image.style.filter),
+        middle,
+        "演出半程与导出同一时刻的静态状态必须给出同一个阴影",
+      );
+    });
+  });
+});
+
+test("a lamp and its target can move together without the shade jumping to the end", async () => {
+  await withManualFrames(async (tick) => {
+    await inFakeDom(async () => {
+      const { stage, character } = domStage();
+      const objects = createStageObjects(stage);
+      const lamp = objects.Light(["FFFFFF", 1], { assignee: "lamp" });
+      const hero = objects.Character(["hero.png"], { assignee: "hero" });
+      hero.scale(0.5).move(0, 0);
+      lamp.spread(360).rotateH(90).zTo(500).xTo(0).enable();
+      hero.enable();
+      const image = character.childNodes[0];
+      const atStart = brightnessOf(image.style.filter);
+
+      // 灯与角色同时横穿光场：两端都亮、中间被追上，逐帧采样的亮度不该只取终点。
+      lamp.xTo(1400, 100);
+      hero.move(1400, 0, null, 100);
+      tick(50);
+      const middle = brightnessOf(image.style.filter);
+      assert.ok(middle < 1, `半程灯还在照着角色，实际 ${image.style.filter}`);
+      tick(50);
+      assert.ok(
+        brightnessOf(image.style.filter) >= middle,
+        "走完这程不该比半程还暗",
+      );
+      assert.ok(atStart < 1, "起点应当有逆光暗部");
+    });
   });
 });
 

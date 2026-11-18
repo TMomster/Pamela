@@ -17,6 +17,7 @@ import { createEffectFactory } from "./effect.js";
 import {
   addTint,
   clampChannel,
+  LOOK_PROPERTIES,
   lookFilter,
   lookFilterFull,
   lookIsNeutral,
@@ -36,7 +37,7 @@ import {
   normalizeLight,
 } from "./light.js";
 import { frameAt, pathDuration, pathEnd, pointAt } from "./path.js";
-import { PARAM_SPECS, boolArg } from "./pamela.js";
+import { OBJECT_DESTROY, PARAM_SPECS, boolArg, methodNameOf } from "./pamela.js";
 import {
   PAMELA_INTRO_MS,
   drawPamelaIntro,
@@ -44,14 +45,16 @@ import {
 } from "./pamela-intro.js";
 import {
   BACKGROUND_DEPTH,
-  CAMERA_DISTANCE,
   CORNERS,
+  DEFAULT_CAMERA,
   byDepth,
   clampDepth,
   depthScale,
   homographyInPixels,
   isFlatPose,
+  normalizeCamera,
   orientationOf,
+  projectPoint,
   projectPose,
   quadHomography,
   ORDER_CEILING,
@@ -77,6 +80,10 @@ import { createVideoFactory } from "./video.js";
  */
 export const STAGE_WIDTH = 1920;
 export const STAGE_HEIGHT = 1080;
+
+/** The light layer's fixed logical size and canvas scale. */
+const LIGHT_LAYER_SIZE = Object.freeze({ width: STAGE_WIDTH, height: STAGE_HEIGHT });
+const LIGHT_LAYER_SCALE = 0.5;
 
 /**
  * The stage point under a pointer, or null when the pointer is outside.
@@ -425,16 +432,17 @@ function boxOf(entry) {
  * @param {object} entry 舞台上的一个对象（带 x/y/z 与三个转角）
  * @param {number} lx 在物体自身坐标里离中心多远（右为正）
  * @param {number} ly 同上（上为正）
- * @param {boolean} [perspective] 舞台是否开着透视；关着时按正交投影算。
- * @returns {{x: number, y: number}} 舞台坐标
+ * @param {{perspective?: boolean, camera?: object}} [view] 当前取景。
+ * @returns {{x: number, y: number}} 画面坐标
  */
-function outOfBox(entry, lx, ly, perspective = false) {
+function outOfBox(entry, lx, ly, view = {}) {
   const originX = Number(entry.x) || 0;
   const originY = Number(entry.y) || 0;
   if (isFlatPose(entry)) {
     const radians = ((Number(entry.rotation) || 0) * Math.PI) / 180;
     const cos = Math.cos(radians);
     const sin = Math.sin(radians);
+    // 平躺的物体作者点仍在舞台坐标里；投影留给 projectStagePoint 那一步。
     return { x: originX + lx * cos + ly * sin, y: originY - lx * sin + ly * cos };
   }
   const { matrix } = orientationOf(entry);
@@ -442,10 +450,10 @@ function outOfBox(entry, lx, ly, perspective = false) {
   const wx = matrix[0] * lx + matrix[1] * ly + originX;
   const wy = matrix[3] * lx + matrix[4] * ly + originY;
   const wz = matrix[6] * lx + matrix[7] * ly + depth;
-  const flat = perspective
-    ? CAMERA_DISTANCE / Math.max(1, CAMERA_DISTANCE + wz)
-    : 1;
-  return { x: wx * flat, y: wy * flat };
+  return projectPoint(
+    { x: wx, y: wy, z: wz },
+    { perspective: view.perspective, camera: view.camera },
+  );
 }
 
 /**
@@ -454,16 +462,16 @@ function outOfBox(entry, lx, ly, perspective = false) {
  * 自由变换之后的八个点是「作者坐标」，它们本身不带朝向；一个转过身的物体
  * 把它们整体当作一块刚体转过去再投影，形状才不会一半在里一半在外。
  */
-function projectStagePoint(entry, at, perspective = false) {
+function projectStagePoint(entry, at, view = {}) {
   if (isFlatPose(entry)) {
-    const flat = depthScale(entry.z, perspective);
+    const flat = depthScale(entry.z, view.perspective, view.camera);
     return { x: at.x * flat, y: at.y * flat };
   }
   return outOfBox(
     entry,
     at.x - (Number(entry.x) || 0),
     at.y - (Number(entry.y) || 0),
-    perspective,
+    view,
   );
 }
 
@@ -490,11 +498,16 @@ function matrix3dOf(h) {
  * @returns {{ left: number, top: number, transform: string }}
  *   中心点的位置（百分比）与整条 transform。
  */
-function frameOf(entry, units, perspective = false) {
-  const pose = projectPose(entry, boxOf(entry), { perspective });
+function frameOf(entry, units, view = {}) {
+  const pose = projectPose(entry, boxOf(entry), {
+    perspective: view.perspective,
+    camera: view.camera,
+  });
   const left = 50 + ((pose.center.x / STAGE_WIDTH) * 100);
   const top = 50 - ((pose.center.y / STAGE_HEIGHT) * 100);
-  if (pose.flat) {
+  // 有径向畸变时四个角不再落在一条仿射变换能表达的矩形上，必须走单应那条路。
+  const distorted = Boolean(view.camera?.k1 || view.camera?.k2);
+  if (pose.flat && !distorted) {
     const flat = pose.center.scale;
     const sx = entry.scaleX ?? 1;
     const sy = entry.scaleY ?? 1;
@@ -553,7 +566,7 @@ function frameOf(entry, units, perspective = false) {
  * @param {object} entry A frame with a known `w` and `h`.
  * @returns {Record<string, {x: number, y: number}>}
  */
-function pointsOf(entry, perspective = false) {
+function pointsOf(entry, view = {}) {
   const box = boxOf(entry);
   const scale = entry.scale ?? 1;
   const scaleX = entry.scaleX ?? 1;
@@ -564,7 +577,7 @@ function pointsOf(entry, perspective = false) {
       entry,
       (ax * box.w * scale * scaleX) / 2,
       (ay * box.h * scale * scaleY) / 2,
-      perspective,
+      view,
     );
   }
   return points;
@@ -583,8 +596,8 @@ function pointsOf(entry, perspective = false) {
  * @param {object} entry A frame with a settled box.
  * @returns {Record<string, {x: number, y: number}>}
  */
-function currentPoints(entry, perspective = false) {
-  return entry.deformed ? entry.points : pointsOf(entry, perspective);
+function currentPoints(entry, view = {}) {
+  return entry.deformed ? entry.points : pointsOf(entry, view);
 }
 
 // 四个角的名字与顺序（`CORNERS`）定义在 `ui/space.js`：网格、投影与灯光
@@ -685,9 +698,9 @@ function pulledPoints(points, handle, x, y) {
  * drawing — or from the mesh's own points once a pull has happened — so a
  * relative pull starts from where the object actually stands.
  */
-function boxPoint(entry, handle, perspective = false) {
-  const points = currentPoints(entry, perspective);
-  return points ? points[handle] : pointsOf(entry, perspective)[handle];
+function boxPoint(entry, handle, view = {}) {
+  const points = currentPoints(entry, view);
+  return points ? points[handle] : pointsOf(entry, view)[handle];
 }
 
 /**
@@ -841,6 +854,151 @@ function resizeTo(object, kind, value, time) {
 function resizeBy(object, kind, value, time) {
   const by = factor(kind, value);
   return resizeTo(object, kind, object.size * by, time);
+}
+
+/**
+ * 一个图片对象能被 `flush` 复原的效果：名字 → 复原动作。
+ *
+ * 名字就是方法自己的名字，所以 `flush(scale)` 与 `scale(2)` 是同一件事的两个
+ * 方向：一个改，一个回到原处。落在同一个状态上的几个名字（`rgb` / `rgbTo` /
+ * `hex` 都是调色，`move` 与两个单轴都是位置）也一并列出，作者按自己刚用过的
+ * 那一个名字清除即可。
+ *
+ * 每一步都走对象自己的方法，所以记在对象上的值也一起归位。表本身不写顺序 —
+ * 不写名字时复原哪几项由 `FLUSH_ALL` 决定；角色的自由变换在它最后（见
+ * `Character.flush`）：网格要按已经归位的姿态落回框。
+ *
+ * @param {object} object A `Background`, `Character` or `Text`.
+ * @param {number} homeDepth 深度回到哪一层：背景比角色远一层。
+ * @returns {Record<string, (time: number) => void>}
+ */
+function imageFlushers(object, homeDepth) {
+  const home = (time) => object.moveTo(0, 0, homeDepth, time);
+  // 单轴只把那一轴归零，另一个坐标（与深度）留在原处。
+  const homeX = (time) => object.moveTo(0, object.py, undefined, time);
+  const homeY = (time) => object.moveTo(object.px, 0, undefined, time);
+  const homeZ = (time) => object.moveTo(object.px, object.py, homeDepth, time);
+  return {
+    // 位置。
+    move: home,
+    moveTo: home,
+    x: homeX,
+    h: homeX,
+    xTo: homeX,
+    hTo: homeX,
+    y: homeY,
+    v: homeY,
+    yTo: homeY,
+    vTo: homeY,
+    z: homeZ,
+    zTo: homeZ,
+    // 转角与大小。
+    rotate: (time) => object.rotateTo(0, time),
+    rotateTo: (time) => object.rotateTo(0, time),
+    rotateH: (time) => object.rotateHTo(0, time),
+    rotateHTo: (time) => object.rotateHTo(0, time),
+    rotateV: (time) => object.rotateVTo(0, time),
+    rotateVTo: (time) => object.rotateVTo(0, time),
+    scale: (time) => object.scaleTo(1, time),
+    scaleTo: (time) => object.scaleTo(1, time),
+    // 透明度：`hide` 写下的 0 也是要清除的效果。
+    alpha: (time) => object.alpha(1, time),
+    hide: (time) => object.alpha(1, time),
+    // 调色：三个名字落回同一个「没有偏移」。
+    rgb: (time) => object.rgbTo(0, 0, 0, time),
+    rgbTo: (time) => object.rgbTo(0, 0, 0, time),
+    hex: (time) => object.rgbTo(0, 0, 0, time),
+    // 四个滤镜各回自己的原样：模糊 0，其余三个 1。
+    blur: (time) => object.blur(0, time),
+    brightness: (time) => object.brightness(1, time),
+    contrast: (time) => object.contrast(1, time),
+    saturate: (time) => object.saturate(1, time),
+  };
+}
+
+/**
+ * 不写名字时 `flush()` 复原哪些效果，按复原的顺序排列。
+ *
+ * 表里每个状态有好几个名字（`rgb` / `rgbTo` / `hex` 都是调色），这里只写一个：
+ * 一次复原把每个状态归位一遍就够了，重复写只会让同一段过渡开始两次。
+ */
+const FLUSH_ALL = Object.freeze([
+  "move",
+  "rotate",
+  "rotateH",
+  "rotateV",
+  "scale",
+  "alpha",
+  "rgb",
+  "blur",
+  "brightness",
+  "contrast",
+  "saturate",
+]);
+
+/** 文字没有位图滤镜：它的全部效果是位置、转角、大小、透明度与自己的三项。 */
+const FLUSH_ALL_TEXT = Object.freeze([
+  "move",
+  "rotate",
+  "rotateH",
+  "rotateV",
+  "scale",
+  "alpha",
+  "blur",
+  "brightness",
+  "contrast",
+  "saturate",
+  "color",
+  "font",
+  "weight",
+]);
+
+/**
+ * `flush(效果名…)` 的公共部分：读出名字与时长，再按表复原。
+ *
+ * 名字由解释器读成一个名字值（`flush(scale)` 里的 `scale` 不是变量、也不是
+ * 文本），时长是末尾的那个数字——位置写法 `flush(scale, 5000)` 与伴随参数
+ * `flush(scale) @ 5000` 落到同一处。
+ *
+ * 不写名字时按 `all` 复原这一类对象的全部效果。名字先全部核对再动手，写错一个
+ * 不会只清掉前半个效果。
+ *
+ * @param {object} object The object being restored.
+ * @param {string} kind Object name, for the messages a writer sees.
+ * @param {unknown[]} args The call's arguments, as written.
+ * @param {Record<string, (time: number) => void>} table What this kind can undo.
+ * @param {readonly string[]} all The effects a nameless call restores, in order.
+ * @returns {object} `object`, so calls may be chained.
+ */
+function flushEffects(object, kind, args, table, all) {
+  const asked = [];
+  let time;
+  for (const value of args) {
+    if (typeof value === "number") {
+      time = value;
+      continue;
+    }
+    const name = methodNameOf(value);
+    if (!name) {
+      throw new Error(`${kind} 的 flush 需要不带引号的效果名，例如 flush(scale)`);
+    }
+    asked.push(name);
+  }
+  const names = asked.length
+    ? asked
+    : all.map((english) => ({ english, written: english }));
+  for (const { english, written } of names) {
+    if (!table[english]) {
+      throw new Error(
+        `${kind} 没有可清除的 ${written}（可用：${Object.keys(table).join("、")}）`,
+      );
+    }
+  }
+  const ms = duration(kind, time);
+  for (const { english } of names) {
+    table[english](ms);
+  }
+  return object;
 }
 
 /**
@@ -1211,7 +1369,7 @@ function lineText(value) {
  * @param {unknown[]} rest Remaining arguments after the text argument and the name are removed.
  * @returns {{ time: number, audio: string | null }}
  */
-function sayTiming(rest) {
+export function sayTiming(rest) {
   let time = 0;
   let audio = null;
   for (const a of rest) {
@@ -1391,8 +1549,9 @@ class Background {
     // 换一张静图意味着不再逐帧播放：`group` 停在当前这张，播放到此为止。
     this.sprite.stop();
     // 空定义（`Background()`）也要占住这一层：`setBackground("")` 会把画面
-    // 清空，而随后 `group` 给的第一张就落在同一块背景上。
-    this.stage.setBackground(this.path);
+    // 清空，而随后 `group` 给的第一张就落在同一块背景上。把图片就绪交给解释器
+    // 等待，链式调用里紧随其后的 `show(ms)` 才会在一张可见、已解码的图上起跑渐显。
+    this[APPLY_REPORT](this.stage.setBackground(this.path));
     // A tint asked for before the image is on the stage is remembered on the
     // object and replayed now that there is a picture to paint it onto.
     this.stage.applyTint(this.filterTarget, this.tint.r, this.tint.g, this.tint.b, 0);
@@ -1871,6 +2030,17 @@ class Background {
     this.stage.applyLook(this.filterTarget, this.look, duration(this.kind, time));
     return this;
   }
+
+  /**
+   * 清除一种效果：把 `scale` / `blur` / `rgb` 这类方法写下的东西复原回去。
+   *
+   * `flush(scale)` 把倍率归 1，`flush(rgb) @ 5000` 在 5000 毫秒里把调色撤回
+   * 到没有偏移；名字可以写多个，时长为最后那个数（或写在 `@` 后面）。不写名字
+   * 就是这张背景的全部效果一起复原。
+   */
+  flush(...args) {
+    return flushEffects(this, "Background", args, imageFlushers(this, BACKGROUND_DEPTH), FLUSH_ALL);
+  }
 }
 
 /**
@@ -2042,7 +2212,9 @@ class Character {
     this.sprite.stop();
     // 空定义（`Character()`）也要占住槽位：`setCharacter(slot, "")` 建一个空
     // 槽位而不画图，位置、透明度与滤镜先落在上面，等 `group` 的第一张图来用。
-    this.stage.setCharacter(this.slot, this.path);
+    // 把图片就绪交给解释器等待：链式调用里紧随的 `show(ms)` 要在图真正可见后
+    // 起跑，否则透明度的 CSS 过渡走在一张隐藏的图上，看起来就是瞬现。
+    this[APPLY_REPORT](this.stage.setCharacter(this.slot, this.path));
     // A tint asked for before the image is on the stage is remembered on the
     // object and replayed now that there is a picture to paint it onto.
     this.stage.applyTint(this.filterTarget, this.tint.r, this.tint.g, this.tint.b, 0);
@@ -2517,6 +2689,27 @@ class Character {
     this.stage.applyLook(this.filterTarget, this.look, duration(this.kind, time));
     return this;
   }
+
+  /**
+   * 清除一种效果：`flush(scale)` 复原倍率，`flush(transform)` 把八点自由变换
+   * 拉回原来的框，可以写多个名字，时长写在最后或用 `@` 给出。
+   *
+   * 不写名字时角色的全部效果一起复原；自由变换排在最后，好让网格按已经归位的
+   * 姿态落回框，而不是落回转身之前的那张框上（见 `imageFlushers`）。
+   */
+  flush(...args) {
+    return flushEffects(
+      this,
+      "Character",
+      args,
+      {
+        ...imageFlushers(this, 0),
+        // 自由变换要舞台动手：八点网格归位后换回普通图片画法。
+        transform: (time) => this[APPLY_REPORT](this.stage.resetCharacterPoints(this.slot, time)),
+      },
+      [...FLUSH_ALL, "transform"],
+    );
+  }
 }
 
 /**
@@ -2619,6 +2812,8 @@ class Text {
     this.fontFamily = inherited?.fontFamily ?? "";
     // The CSS weight the family is drawn at; 400 is the regular face.
     this.fontWeight = inherited?.fontWeight ?? TEXT_FONT_WEIGHT;
+    // 和图片一样记下这行字一直带着的滤镜，重建变量时接着它走，不回到原样。
+    this.look = inherited?.look ? { ...neutralLook(), ...inherited.look } : neutralLook();
     this.placed = false;
     this.kind = "Text";
     this.filterTarget = this.slot;
@@ -2660,6 +2855,8 @@ class Text {
       rotateV: this.angleV,
     });
     this[APPLY_ALPHA](this.opacity, 0);
+    // 和图片一样：enable 之前写下的滤镜落在新建的文字元素上。
+    this.stage.applyLook(this.filterTarget, this.look, 0);
     return this;
   }
 
@@ -2679,6 +2876,40 @@ class Text {
     if (this.placed) {
       this[APPLY_REPORT](this.stage.setTextColor(this.slot, next, duration("Text", time)));
     }
+    return this;
+  }
+
+  /**
+   * The four look filters on the text, over `time`.
+   *
+   * A Text has no bitmap to tint, but the browser's CSS `filter` applies to a
+   * text element just as it does to a picture. The four are sliders on one
+   * filter, so setting one keeps the others; a `time` walks into the new look
+   * frame by frame, the same way a picture's look does.
+   */
+  blur(value, time) {
+    return this.applyLookValues("blur", value, time);
+  }
+
+  /** Brightens (`>1`) or darkens (`<1`) the text, over `time`. */
+  brightness(value, time) {
+    return this.applyLookValues("brightness", value, time);
+  }
+
+  /** Raises (`>1`) or lowers (`<1`) the text's contrast, over `time`. */
+  contrast(value, time) {
+    return this.applyLookValues("contrast", value, time);
+  }
+
+  /** Saturates (`>1`) or greys out (`0`) the text, over `time`. */
+  saturate(value, time) {
+    return this.applyLookValues("saturate", value, time);
+  }
+
+  /** Remembers one look property and asks the stage to paint it over `time`. */
+  applyLookValues(property, value, time) {
+    this.look = withLook(this.look, property, value, this.kind);
+    this[APPLY_REPORT](this.stage.applyLook(this.filterTarget, this.look, duration(this.kind, time)));
     return this;
   }
 
@@ -2869,6 +3100,25 @@ class Text {
   /** Resizes the text by `value`, relative to its current size. */
   scale(value, time) {
     return resizeBy(this, "Text", value, time);
+  }
+
+  /**
+   * 清除一种效果：`flush(scale)` 复原倍率，`flush(color)` 回到默认颜色，
+   * 可以写多个名字，时长写在最后或用 `@` 给出。
+   *
+   * 文字的四个滤镜与图片同名同义，调色（rgb / rgbTo / hex）才只对位图有意义；
+   * 颜色、字体与字重是它自己的三项。不写名字时它自己的全部效果一起复原。
+   */
+  flush(...args) {
+    const table = imageFlushers(this, 0);
+    // 文字没有位图，SVG 颜色矩阵的调色对它没有意义。
+    for (const name of ["rgb", "rgbTo", "hex"]) {
+      delete table[name];
+    }
+    table.color = (time) => this.color(DEFAULT_TEXT_COLOR, time);
+    table.font = () => this.font("");
+    table.weight = () => this.weight(TEXT_FONT_WEIGHT);
+    return flushEffects(this, "Text", args, table, FLUSH_ALL_TEXT);
   }
 }
 
@@ -3277,6 +3527,118 @@ class Light {
   }
 }
 
+/** Camera 的数值参数：名字与 `PARAM_SPECS.Camera` 一一对应。 */
+function cameraNumber(name, value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Camera 的 ${name} 需要数字，收到${typeof value === "string" ? `"${value}"` : String(value)}`);
+  }
+  return parsed;
+}
+
+const CAMERA_SET = Symbol("cameraSet");
+
+/**
+ * 一台摄影机。
+ *
+ * 它不画在舞台上，也不改世界坐标：它只决定「从哪、朝哪、以多宽的视角」看那
+ * 套唯一的世界坐标。`enable()` 让它成为当前取景，和别的对象的 `enable()` 同
+ * 名同义——都是「从这一刻起生效」。
+ */
+class Camera {
+  constructor(args, stage, context) {
+    this.kind = "Camera";
+    this.stage = stage;
+    const options = ctorOptions("Camera", args);
+    this.params = normalizeCamera({
+      x: options.x,
+      y: options.y,
+      z: options.z,
+      rotate: options.rotate ?? options.rotation,
+      rotateH: options.rotateH,
+      rotateV: options.rotateV,
+      fov: options.fov,
+      k1: options.k1,
+      k2: options.k2,
+    });
+    this[APPLY_REPORT] = (started) => {
+      if (started) {
+        context?.pending?.push(started);
+      }
+    };
+  }
+
+  /** 数值参数的一次过渡：目标立刻写回，画面从旧值走过去。 */
+  [CAMERA_SET](patch, time) {
+    const ms = duration("Camera", time);
+    const next = normalizeCamera({ ...this.params, ...patch });
+    Object.assign(this.params, next);
+    this[APPLY_REPORT](this.stage.animateCamera(this, { ...next }, ms));
+    return this;
+  }
+
+  /** 把相机移到绝对位置 `(x, y, z)`。 */
+  moveTo(x, y, z, time) {
+    const patch = {};
+    if (x !== undefined && x !== null) patch.x = cameraNumber("x", x);
+    if (y !== undefined && y !== null) patch.y = cameraNumber("y", y);
+    if (z !== undefined && z !== null) patch.z = cameraNumber("z", z);
+    return this[CAMERA_SET](patch, time);
+  }
+
+  /** 沿当前世界的三个轴相对移动：`h` 右、`v` 上、`d` 往画面深处。 */
+  move(h, v, d, time) {
+    return this.moveTo(
+      this.params.x + (h === undefined || h === null ? 0 : cameraNumber("h", h)),
+      this.params.y + (v === undefined || v === null ? 0 : cameraNumber("v", v)),
+      this.params.z + (d === undefined || d === null ? 0 : cameraNumber("d", d)),
+      time,
+    );
+  }
+
+  /** 三个转角都绕固定世界轴，按 W → H → V 作用（与物体同一套约定）。 */
+  rotateTo(degrees, time) {
+    return this[CAMERA_SET]({ rotate: angle("Camera", degrees) }, time);
+  }
+
+  rotate(degrees, time) {
+    return this.rotateTo(this.params.rotate + angle("Camera", degrees), time);
+  }
+
+  rotateH(degrees, time) {
+    return this[CAMERA_SET]({ rotateH: angle("Camera", degrees) }, time);
+  }
+
+  rotateV(degrees, time) {
+    return this[CAMERA_SET]({ rotateV: angle("Camera", degrees) }, time);
+  }
+
+  /** 垂直视角；值越大，画面能容下的世界范围越大。 */
+  fov(value, time) {
+    return this[CAMERA_SET]({ fov: cameraNumber("fov", value) }, time);
+  }
+
+  /** 径向畸变的两个系数；负 k1 桶形，正 k1 枕形。 */
+  distort(k1, k2, time) {
+    return this[CAMERA_SET]({
+      k1: cameraNumber("k1", k1 ?? 0),
+      k2: cameraNumber("k2", k2 ?? 0),
+    }, time);
+  }
+
+  /** 成为当前取景；原先那台自动失活。 */
+  enable() {
+    this.stage.activateCamera(this);
+    return this;
+  }
+
+  /** 若自己正是当前取景，退回内置默认相机。 */
+  disable() {
+    this.stage.deactivateCamera(this);
+    return this;
+  }
+}
+
 /**
  * The factories behind the types the stage builds.
  *
@@ -3310,6 +3672,108 @@ export function createStageObjects(stage) {
     const kind = String(object.kind ?? "object");
     const name = object.slot ?? context?.assignee ?? `${kind.toLowerCase()}-${(unnamed += 1)}`;
     const key = kind === "Background" ? "background" : `${kind.toLowerCase()}:${name}`;
+
+    // 统一的活跃状态：新建对象一律失活，enable 才让它上台，disable 让它退场。
+    // 失活对象上的 show / move 仍然改属性，但舞台没有它的槽位，画面不会动。
+    object.active = false;
+    object.destroyed = false;
+    const imageKind = kind === "Background" || kind === "Character" || kind === "Text";
+    const autoShow = context?.autoShow !== false;
+    const pendingList = () => (Array.isArray(context?.pending) ? context.pending : null);
+    /** 把动作接在这条语句刚启动的第一件异步工作之后（图片解码、淡入淡出）。 */
+    const afterStarted = (list, from, action) => {
+      if (!list || from < 0 || from >= list.length) {
+        action();
+        return;
+      }
+      const ready = list[from];
+      list[from] = Promise.resolve(ready).then(action);
+    };
+    const releaseFromStage = () => {
+      object.placed = false;
+      if (kind === "Background") {
+        stage.setBackground?.("");
+      } else if (kind === "Character") {
+        stage.releaseCharacter?.(name);
+      } else if (kind === "Text") {
+        stage.releaseText?.(name);
+      }
+    };
+    const baseEnable = typeof object.enable === "function" ? object.enable.bind(object) : null;
+    const baseDisable = typeof object.disable === "function" ? object.disable.bind(object) : null;
+    // enable 自带的渐显排在图片解码之后。cue 里不等待语句，解码又可能很慢；
+    // 若这期间又写了 hide，迟到的渐显会把已经藏好的图重新亮出来。每次 hide /
+    // 重建都换一个号，只有号没变的渐显才准落地。
+    let presenceToken = 0;
+    if (imageKind && typeof object.hide === "function") {
+      const baseHide = object.hide.bind(object);
+      object.hide = (time = 0) => {
+        presenceToken += 1;
+        return baseHide(time);
+      };
+    }
+    if (baseEnable) {
+      object.enable = (time = 0) => {
+        if (object.destroyed) return object;
+        object.active = true;
+        const list = pendingList();
+        const from = list ? list.length : -1;
+        if (imageKind) {
+          // enable 自带 show：先把透明度压到 0，图就绪后再淡到 1。autoShow=0
+          // 时只激活、不上场，之后的 show 才让它露面。
+          object.opacity = 0;
+        }
+        const token = ++presenceToken;
+        baseEnable(time);
+        if (imageKind && autoShow) {
+          afterStarted(list, from, () => {
+            if (presenceToken === token) {
+              object.alpha(1, Number(time) || 0);
+            }
+          });
+        }
+        return object;
+      };
+    }
+    object.disable = (time = 0) => {
+      if (object.destroyed || !object.active) return object;
+      object.active = false;
+      const ms = Math.max(0, Number(time) || 0);
+      const list = pendingList();
+      const from = list ? list.length : -1;
+      if (imageKind) {
+        if (object.placed && ms > 0) {
+          object.hide(ms);
+          afterStarted(list, from, releaseFromStage);
+        } else {
+          if (object.placed) object.hide(0);
+          releaseFromStage();
+        }
+        return object;
+      }
+      if (baseDisable) {
+        if (kind === "Light" && ms > 0) {
+          object.intensity(0, ms);
+          afterStarted(list, from, baseDisable);
+        } else {
+          baseDisable(ms);
+        }
+      }
+      return object;
+    };
+    if (typeof object[OBJECT_DESTROY] !== "function") {
+      object[OBJECT_DESTROY] = () => {
+        if (object.destroyed) return;
+        object.destroyed = true;
+        object.active = false;
+        presenceToken += 1;
+        if (imageKind) {
+          releaseFromStage();
+        } else {
+          baseDisable?.(0);
+        }
+      };
+    }
     if (kind === "Light") {
       object.axesKey = key;
     }
@@ -3352,6 +3816,8 @@ export function createStageObjects(stage) {
       withObjectMethods(new Text(args[0], stage, context, ctorOptions("Text", args)), context),
     // 光源同第一参数是颜色：它不读素材，画在舞台的灯层上。
     Light: (args, context) => withObjectMethods(new Light(args, stage, context), context),
+    // 摄影机不读素材，也不画在舞台上：它只提供当前取景。
+    Camera: (args, context) => withObjectMethods(new Camera(args, stage, context), context),
     // A sound is built against the stage the same way, so its slot and its
     // source resolution come from the same place a picture's do.
     Audio: (args, context) => withObjectMethods(stage.audio(args, context), context),
@@ -3467,14 +3933,18 @@ export function createStageGlobals(stage, objects = createStageObjects(stage)) {
       Light(...args) {
         return objects.Light?.(args, context);
       },
+      Camera(...args) {
+        return objects.Camera?.(args, context);
+      },
       /**
        * 环境亮度：整块画面的乘算亮度，0–2，1 为原样。
        *
        * 它只压画面（背景、角色、视频、粒子、文字），不碰对话框与选项——那是一层
-       * 界面，不是被照的东西。
+       * 界面，不是被照的东西。给了 `time` 就在这些毫秒里渐变过去，剧本会等它
+       * 走完再继续。
        */
-      ambient(value) {
-        stage.setAmbient?.(value);
+      ambient(value, time) {
+        context.pending?.push(stage.setAmbient?.(value, time));
         return stageApi;
       },
       /**
@@ -3855,6 +4325,70 @@ function buildMesh() {
   return { node, pieces };
 }
 
+/** The nine mesh nodes, projected to the stage the way the mesh is painted. */
+function meshNodesOf(entry, view = {}) {
+  const zoom = (point) => projectStagePoint(entry, point, view);
+  const nodes = {};
+  for (const [name, point] of Object.entries(entry.points)) {
+    nodes[name] = zoom(point);
+  }
+  nodes.centre = zoom(centroidOf(entry.points));
+  return nodes;
+}
+
+/** The stage-space box a projected mesh actually covers. */
+function meshBoundsOf(nodes) {
+  const points = Object.values(nodes);
+  const xs = points.map((point) => point.x);
+  const ys = points.map((point) => point.y);
+  const left = Math.min(...xs);
+  const top = Math.min(...ys);
+  return {
+    x: (left + Math.max(...xs)) / 2,
+    y: (top + Math.max(...ys)) / 2,
+    w: Math.max(...xs) - left,
+    h: Math.max(...ys) - top,
+  };
+}
+
+/**
+ * The light layer's copy of a mesh: the same eight triangles, already mapped
+ * into the layer's canvas. The stage paints through CSS matrices over a frame
+ * of its own size; `drawSilhouette` gets matrices over the picture's logical
+ * pixels instead, so the bitmap it cuts out lands on exactly these triangles.
+ */
+function lightMeshOf(box, nodes, size = LIGHT_LAYER_SIZE, scale = LIGHT_LAYER_SCALE) {
+  const pieces = [];
+  for (const triangle of MESH_TRIANGLES) {
+    const source = triangle.map((name) => {
+      const [u, v] = MESH_NODES[name];
+      return { x: (u - 0.5) * box.w, y: (v - 0.5) * box.h };
+    });
+    const target = triangle.map((name) => ({
+      x: size.width / 2 + nodes[name].x * scale,
+      y: size.height / 2 - nodes[name].y * scale,
+    }));
+    const at = affineFor(source, target);
+    if (at) {
+      pieces.push({ target, ...at });
+    }
+  }
+  const points = Object.values(nodes);
+  const xs = points.map((point) => size.width / 2 + point.x * scale);
+  const ys = points.map((point) => size.height / 2 - point.y * scale);
+  const left = Math.min(...xs);
+  const top = Math.min(...ys);
+  return {
+    pieces,
+    bounds: {
+      x: (left + Math.max(...xs)) / 2,
+      y: (top + Math.max(...ys)) / 2,
+      width: Math.max(...xs) - left,
+      height: Math.max(...ys) - top,
+    },
+  };
+}
+
 /**
  * Draws a character through its eight points.
  *
@@ -3866,16 +4400,9 @@ function buildMesh() {
  * A shape with no area to it — three points on one line — leaves a piece
  * unasked, rather than handing the browser a matrix of infinities.
  */
-function drawMesh(entry, perspective = false) {
+function drawMesh(entry, view = {}) {
   const size = entry.frameSize;
-  // 点本身始终是舞台平面上的作者坐标，只有投影改变它们落在画面上哪里：
-  // 没转身时是按深度缩放，转过身之后是整块刚体转过去再透视。
-  const zoom = (point) => projectStagePoint(entry, point, perspective);
-  const nodes = {};
-  for (const [name, point] of Object.entries(entry.points)) {
-    nodes[name] = zoom(point);
-  }
-  nodes.centre = zoom(centroidOf(entry.points));
+  const nodes = meshNodesOf(entry, view);
   MESH_TRIANGLES.forEach((triangle, index) => {
     const { piece, image } = entry.mesh.pieces[index];
     const target = triangle.map((name) => nodes[name]);
@@ -3929,6 +4456,7 @@ function createLayer(name) {
  *   transformCharacter: (slot: string, rotation: number, scale: number, time: number) => Promise<void> | undefined,
  *   transformCharacterPoint: (slot: string, handle: string, x: number, y: number, time: number) => Promise<void> | undefined,
  *   moveCharacterPoint: (slot: string, handle: string, dx: number, dy: number, time: number) => Promise<void> | undefined,
+ *   resetCharacterPoints: (slot: string, time: number) => Promise<void> | undefined,
  *   choose: (labels: string[]) => Promise<number>,
  *   clear: () => void, isEmpty: () => boolean,
  *   backgroundPath: () => string | null }}
@@ -4220,6 +4748,12 @@ export function createStage({
   let perspectiveOn = false;
   let guidelineOn = false;
   let guidelineEvery = GUIDELINE_INTERVAL;
+  // 只有一台相机在取景；没调用过 enable() 时就是内置的那台固定相机。
+  let activeCamera = normalizeCamera(DEFAULT_CAMERA);
+  let activeCameraObject = null;
+
+  /** 当前取景，传给所有真正参与画面的投影函数。 */
+  const viewState = () => ({ perspective: perspectiveOn, camera: activeCamera });
 
   const guidelineLayer = createGuidelineLayer({
     size: { width: STAGE_WIDTH, height: STAGE_HEIGHT },
@@ -4287,6 +4821,7 @@ export function createStage({
     isReplaying: () => replaying,
     isPreviewing: () => previewing,
     perspective: () => perspectiveOn,
+    camera: () => activeCamera,
     onError,
   });
 
@@ -4524,6 +5059,9 @@ export function createStage({
       perspectiveOn = false;
       guidelineOn = false;
       guidelineEvery = GUIDELINE_INTERVAL;
+      // 摄影机也是这次演出的取景：下一场回到内置默认机位。
+      activeCameraObject = null;
+      activeCamera = normalizeCamera(DEFAULT_CAMERA);
       guidelineLayer.clear();
     });
     clearStep(refreshEmpty);
@@ -4559,7 +5097,7 @@ export function createStage({
    * @returns {Promise<void> | undefined} `undefined` for a change with no
    *   duration to wait out, as the rest of the stage answers.
    */
-  const eased = (time, apply) => {
+  const eased = (time, apply, onEntry) => {
     if (!(time > 0)) {
       apply(1);
       return undefined;
@@ -4568,17 +5106,22 @@ export function createStage({
     const ticket = cutTicket;
     let frame = 0;
     let cancelled = false;
+    const release = () => {
+      runningEases.delete(entry);
+      onEntry?.(null);
+    };
     const entry = {
       cancel: () => {
         cancelled = true;
         cancelFrame(frame);
+        release();
       },
       // 「下一步」 lands the interpolation on its last frame rather than leaving
       // it to ease on after the run has already gone on.
       finish: () => {
         cancelled = true;
         cancelFrame(frame);
-        runningEases.delete(entry);
+        release();
         apply(1);
       },
     };
@@ -4596,10 +5139,11 @@ export function createStage({
       if (progress < 1) {
         frame = nextFrame(step);
       } else {
-        runningEases.delete(entry);
+        release();
       }
     };
     runningEases.add(entry);
+    onEntry?.(entry);
     frame = nextFrame(step);
     return settled(time);
   };
@@ -4617,6 +5161,24 @@ export function createStage({
   const lights = new Set();
   /** 环境亮度，0–2；1 是原样。 */
   let lightAmbient = 1;
+  /** 画面上正显示的环境亮度：过渡从它起步，而不是从上一次的目标值。 */
+  let ambientShown = 1;
+
+  /**
+   * 灯层与逆光暗部读到的对象姿态。
+   *
+   * 普通移动交给了 CSS transition：JS 一次把 `entry.x/y/z` 写成终点，元素在接
+   * 下来那段时间里自己滑过去。灯层没有这条通道——它读的是这里的数字——所以
+   * 移动期间必须交出逐帧插值的位置（`move` 里推进的 `moveLive`），否则阴影从
+   * 一开始就停在终点，而导出那条路每帧按 `t` 采样，两边就对不上了。
+   *
+   * 网格自己逐帧搬八个点，位置已经跟着走，不再叠一层插值。
+   *
+   * @param {object} entry 舞台上的一个对象。
+   * @returns {object} 此刻该用来算剪影与暗部的姿态。
+   */
+  const litPoseOf = (entry) =>
+    entry.moveLive && !entry.deformed ? { ...entry, ...entry.moveLive } : entry;
 
   /**
    * The objects a light can fall on, as silhouettes.
@@ -4631,10 +5193,14 @@ export function createStage({
     const list = [];
     /**
      * 一个对象在灯层里的剪影。跟着透视走：远处的对象在画面里更小、更靠中心；
-     * 转过身之后交出去的是投影后的四个角，边光才贴着它真正的轮廓。
+     * 转过身之后交出去的是投影后的四个角。被拉过点的对象交出的是它此刻正在
+     * 用的八个网格三角形，边光才贴着变形后的轮廓。
      */
     const silhouetteOf = (entry, key, bitmap) => {
-      const box = boxOf(entry);
+      // 移动中的对象交给 `litPoseOf` 取这一帧的位置：CSS 正在把元素滑向终点，
+      // 剪影、挡光的洞和轮廓光都得跟着画面里的实际位置走。
+      const posed = litPoseOf(entry);
+      const box = boxOf(posed);
       // 透光的对象不按深度挡灯（见 `ui/light.js` 的 `holesOf`）：角色默认挡，
       // 背景、文字这些默认让光穿过去。
       const cast = !translucentOf(key);
@@ -4642,14 +5208,37 @@ export function createStage({
       const rim = rimLightOf(key);
       // 剪影的取样跟着角色自己的抗锯齿：关着的角色，边光也得是硬边。
       const smooth = key === "background" || antialiasIsOn(antialiasOf(key));
-      if (!isFlatPose(entry)) {
-        const pose = projectPose(entry, box, { perspective: perspectiveOn });
+      if (posed.deformed && posed.points) {
+        const nodes = meshNodesOf(posed, viewState());
+        const rect = meshBoundsOf(nodes);
+        return {
+          key,
+          bitmap,
+          x: rect.x,
+          y: rect.y,
+          z: posed.z ?? 0,
+          // 网格的仿射矩阵把这份**未缩放**的位图直接投到画布上。
+          w: box.w,
+          h: box.h,
+          rotation: 0,
+          scale: 1,
+          scaleX: 1,
+          scaleY: 1,
+          rect,
+          cast,
+          rim,
+          smooth,
+          mesh: lightMeshOf(box, nodes),
+        };
+      }
+      if (!isFlatPose(posed)) {
+        const pose = projectPose(posed, box, viewState());
         return {
           key,
           bitmap,
           x: pose.center.x,
           y: pose.center.y,
-          z: entry.z ?? 0,
+          z: posed.z ?? 0,
           w: box.w,
           h: box.h,
           rotation: 0,
@@ -4662,28 +5251,29 @@ export function createStage({
           corners: CORNERS.map((handle) => pose.corners[handle]),
         };
       }
-      const flat = depthScale(entry.z, perspectiveOn);
+      const flat = depthScale(posed.z, viewState().perspective, viewState().camera);
       return {
         key,
         bitmap,
-        x: entry.x * flat,
-        y: entry.y * flat,
-        z: entry.z ?? 0,
+        x: posed.x * flat,
+        y: posed.y * flat,
+        z: posed.z ?? 0,
         w: box.w * flat,
         h: box.h * flat,
-        rotation: entry.rotation,
-        scale: entry.scale,
-        scaleX: entry.scaleX ?? 1,
-        scaleY: entry.scaleY ?? 1,
+        rotation: posed.rotation,
+        scale: posed.scale,
+        scaleX: posed.scaleX ?? 1,
+        scaleY: posed.scaleY ?? 1,
         cast,
         rim,
         smooth,
       };
     };
-    if (background.image) {
+    if (background.image && background.opacity > 0) {
       // 背景同样在表里：它要参与「按自身像素提亮」（灯照到的那块地面真变亮），
       // 而勾不勾边由它自己的 `轮廓光` 决定 —— 整帧的边光只会糊成一片，所以
-      // 默认 0，作者不特意写就不勾。
+      // 默认 0，作者不特意写就不勾。`hide()` 只把透明度写成 0、元素还挂在层里，
+      // 所以这里必须按透明度筛掉，否则灯层缓存里会一直留着已经看不见的背景。
       list.push(silhouetteOf(background, "background", background.image));
     }
     for (const [slot, entry] of characters) {
@@ -4696,8 +5286,8 @@ export function createStage({
   };
 
   const lightRig = createLightLayer({
-    size: { width: STAGE_WIDTH, height: STAGE_HEIGHT },
-    scale: 0.5,
+    size: LIGHT_LAYER_SIZE,
+    scale: LIGHT_LAYER_SCALE,
     objects: litObjects,
     schedule: (run) => nextFrame(run),
   });
@@ -4714,7 +5304,10 @@ export function createStage({
    * （宽度要乘 `scale`，那是对象自己的缩放；`perspectiveOn` 时还要乘深度）。
    */
   const shadeRectOf = (entry) => {
-    const flat = depthScale(entry.z, perspectiveOn);
+    if (entry.deformed && entry.points) {
+      return meshBoundsOf(meshNodesOf(entry, viewState()));
+    }
+    const flat = depthScale(entry.z, viewState().perspective, viewState().camera);
     const scale = entry.scale ?? 1;
     return {
       x: (entry.x || 0) * flat,
@@ -4739,9 +5332,12 @@ export function createStage({
       targets.push([`character:${slot}`, entry]);
     }
     for (const [key, entry] of targets) {
+      // 深度也取插值值：灯与对象同时在 z 上错身而过时，正面照度要跟着这一帧
+      // 的实际前后关系变，而不是提前按终点算好。
+      const posed = litPoseOf(entry);
       const shade = translucentOf(key)
         ? 1
-        : lightShadeOf(placed, shadeRectOf(entry), entry.z ?? 0, key);
+        : lightShadeOf(placed, shadeRectOf(posed), posed.z ?? 0, key);
       if (shade === entry.shade) {
         continue;
       }
@@ -5086,20 +5682,54 @@ export function createStage({
     textLayer.node,
   ];
 
-  /** 环境亮度：整块画面的乘算亮度，0–2。 */
-  const setAmbient = (value) => {
-    const next = Number(value);
-    if (!Number.isFinite(next)) {
-      throw new Error("环境亮度需要 0–2 的数字");
-    }
-    lightAmbient = Math.min(2, Math.max(0, next));
-    const css = lightAmbient === 1 ? "" : `brightness(${lightAmbient})`;
+  /** 把亮度写进每一块画面层的滤镜。 */
+  const paintAmbient = (value) => {
+    ambientShown = value;
+    const css = value === 1 ? "" : `brightness(${value})`;
     for (const node of ambientLayers()) {
       if (node?.style) {
         node.style.filter = css;
       }
     }
-    return lightAmbient;
+  };
+
+  /** 上一次环境亮度过渡的编号：后来的调用让先前那段的帧不再写画面。 */
+  let ambientRun = 0;
+
+  /**
+   * 环境亮度：整块画面的乘算亮度，0–2。
+   *
+   * `time` 省略（或为 0）时立刻落定；给了毫秒数就从画面上当前的亮度线性走到
+   * 新值，返回的 Promise 让剧本等到走完再继续。
+   */
+  const setAmbient = (value, time) => {
+    const next = Number(value);
+    if (!Number.isFinite(next)) {
+      throw new Error("环境亮度需要 0–2 的数字");
+    }
+    const to = Math.min(2, Math.max(0, next));
+    const from = ambientShown;
+    lightAmbient = to;
+    const ms = duration("环境亮度", time);
+    const run = (ambientRun += 1);
+    if (!(ms > 0)) {
+      paintAmbient(to);
+      return undefined;
+    }
+    paintAmbient(from);
+    const started = eased(ms, (progress) => {
+      if (run === ambientRun) {
+        paintAmbient(from + (to - from) * progress);
+      }
+    });
+    // 帧循环的最后一步可能比计时器晚一点；过渡结束的那一刻补上终值，
+    // 让「等它走完」之后读到的画面就是目标亮度。
+    started?.then(() => {
+      if (run === ambientRun) {
+        paintAmbient(to);
+      }
+    });
+    return started;
   };
 
   /** The key a lit object answers to when a light excludes it by name. */
@@ -5178,6 +5808,58 @@ export function createStage({
     redrawProjection();
     guidelineLayer.update(guidelineState());
     return perspectiveOn;
+  };
+
+  /**
+   * `cam.enable()`：让这台相机成为当前取景。
+   *
+   * 相机不改任何对象的坐标，所以切换只需换掉投影用的那一组数，再按新投影
+   * 重画已经摆好的画面。参考线是舞台自己的尺子，留在原来的 1920×1080 上。
+   */
+  const activateCamera = (camera) => {
+    activeCameraObject = camera ?? null;
+    activeCamera = normalizeCamera(camera?.params ?? camera ?? DEFAULT_CAMERA);
+    redrawProjection();
+    return activeCameraObject;
+  };
+
+  /** `cam.disable()`：只有当前那台退出时，画面才回到内置默认相机。 */
+  const deactivateCamera = (camera) => {
+    if (activeCameraObject && camera && activeCameraObject !== camera) {
+      return activeCameraObject;
+    }
+    activeCameraObject = null;
+    activeCamera = normalizeCamera(DEFAULT_CAMERA);
+    redrawProjection();
+    return null;
+  };
+
+  /**
+   * Camera 的数值补间：目标值已经写进 `params`，这里只负责把画面从旧值走过去。
+   *
+   * 相机没有 CSS 通道，和网格一样用逐帧插值；每一帧都走 `redrawProjection`，
+   * 图片、视频、灯剪影与坐标轴才会跟着镜头一起动。
+   */
+  const animateCamera = (camera, target, time) => {
+    if (!(time > 0) || activeCameraObject !== camera) {
+      if (activeCameraObject === camera) {
+        activeCamera = normalizeCamera(target);
+        redrawProjection();
+      }
+      return undefined;
+    }
+    const from = normalizeCamera(activeCamera);
+    const to = normalizeCamera(target);
+    return eased(time, (progress) => {
+      const mixed = { ...from };
+      for (const key of Object.keys(to)) {
+        if (typeof to[key] === "number" && typeof from[key] === "number") {
+          mixed[key] = from[key] + (to[key] - from[key]) * progress;
+        }
+      }
+      activeCamera = normalizeCamera(mixed);
+      redrawProjection();
+    });
   };
 
   /**
@@ -5281,31 +5963,51 @@ export function createStage({
   };
 
   /**
+   * Writes the colour matrix, without touching the CSS `filter` declaration.
+   *
+   * A timed tint runs frame by frame: the declaration has to keep the shape the
+   * look's CSS transition was armed with, while only the matrix changes.
+   */
+  const setTintMatrix = (entry, r, g, b) => {
+    entry.tintColor = { r, g, b };
+    const record = ensureTintFilter(entry);
+    record.matrix.setAttribute?.("values", tintMatrix(r, g, b));
+  };
+
+  /**
    * Paints `entry`'s tint onto its picture.
    *
    * A zero tint clears the offset rather than leaving an identity matrix in
    * place, which would otherwise keep a filter region around the image for no
-   * gain. Both the plain image and — once a character has been pulled into a
-   * mesh — the mesh node are tinted, so a deformed character keeps its colour.
+   * gain. `hold` is for an animation whose ends are both zero: the filter has
+   * to stay referenced while the matrix walks from identity and back, even
+   * though every frame is the identity. Both the plain image and — once a
+   * character has been pulled into a mesh — the mesh node are tinted, so a
+   * deformed character keeps its colour.
    */
-  const paintTint = (entry, r, g, b) => {
-    if (r === 0 && g === 0 && b === 0) {
+  const paintTint = (entry, r, g, b, mode = "normal", hold = false) => {
+    if (!hold && r === 0 && g === 0 && b === 0) {
       entry.tintColor = null;
-      paintFilters(entry);
+      paintFilters(entry, mode);
       return;
     }
-    entry.tintColor = { r, g, b };
-    const record = ensureTintFilter(entry);
-    record.matrix.setAttribute?.("values", tintMatrix(r, g, b));
-    paintFilters(entry);
+    setTintMatrix(entry, r, g, b);
+    paintFilters(entry, mode);
   };
+
+  /** The tint animation currently writing to each picture, if one is running. */
+  const tintEases = new WeakMap();
 
   /**
    * Applies a colour offset to one picture, over `time` milliseconds.
    *
-   * `target` is `"background"` for the backdrop or a character's slot. The wait
-   * the call reports is what lets a script hold the line until the tint is in,
-   * even though the filter itself is swapped in at once.
+   * `target` is `"background"` for the backdrop or a character's slot. The
+   * channels are interpolated frame by frame — an SVG colour matrix cannot be
+   * handed to a CSS transition — so `rgbTo(30, 10, 0, 1500)` really walks into
+   * the dusk instead of arriving there and only waiting out the line. The
+   * declaration is written once, as a full filter list, before the walk: that
+   * keeps a tint started in the same `cue` as a brightness or saturation change
+   * from snapping the look's transition when the filter list gains a function.
    *
    * @returns {Promise<void> | undefined}
    */
@@ -5314,18 +6016,40 @@ export function createStage({
     if (!entry) {
       return undefined;
     }
-    paintTint(entry, r, g, b);
-    return settled(time);
+    // A second tint starts from what is on the picture now, not from where the
+    // first one was heading; otherwise an interrupted walk would jump.
+    tintEases.get(entry)?.cancel();
+    const from = { ...(entry.tintColor ?? { r: 0, g: 0, b: 0 }) };
+    const draw = (progress) => {
+      const between = (start, end) => Math.round(start + (end - start) * progress);
+      setTintMatrix(entry, between(from.r, r), between(from.g, g), between(from.b, b));
+    };
+    if (!(time > 0)) {
+      paintTint(entry, r, g, b);
+      return undefined;
+    }
+    paintTint(entry, from.r, from.g, from.b, "full", true);
+    return eased(time, draw, (ease) => {
+      if (ease) {
+        tintEases.set(entry, ease);
+      } else {
+        tintEases.delete(entry);
+      }
+    });
   };
+
+  /** The look animation currently writing to each picture, if one is running. */
+  const lookEases = new WeakMap();
 
   /**
    * Applies a look — blur, brightness, contrast, saturation — to one picture.
    *
-   * The look is swapped in at once and the wait is what the duration says, the
-   * same deal the tint makes: CSS would need one transition per function to
-   * animate a filter change, and a script that asked for 3000ms is holding the
-   * line for 3000ms either way. A picture with a neutral look has no filter
-   * declaration at all.
+   * The four functions share one CSS `filter` property. A timed change is
+   * interpolated here, frame by frame, instead of being handed to a CSS
+   * transition: that keeps backgrounds and characters on the same clock, and a
+   * tint walking alongside only has to change the SVG colour matrix. The list
+   * is kept in its full four-function shape throughout, so adding a tint's
+   * `url()` never changes the shape of an animation already in flight.
    *
    * @param {"background" | string} target
    * @param {{ blur: number, brightness: number, contrast: number, saturate: number }} look
@@ -5333,35 +6057,44 @@ export function createStage({
    * @returns {Promise<void> | undefined}
    */
   const applyLook = (target, look, time) => {
-    const entry = target === "background" ? background : characters.get(target);
+    const entry =
+      target === "background" ? background : characters.get(target) ?? texts.get(target);
     if (!entry) {
       return undefined;
     }
-    // The look before this call, kept so the transition has a matching start.
-    const previous = entry.look;
-    entry.look = { ...neutralLook(), ...look };
+    // A second look starts from what is on the picture now, not from where the
+    // first one was heading. `entry.look` is the displayed look; the script's
+    // own object keeps the value the writer asked for.
+    lookEases.get(entry)?.cancel();
+    const from = { ...neutralLook(), ...(entry.look ?? {}) };
+    const to = { ...neutralLook(), ...look };
+    const draw = (progress) => {
+      const current = {};
+      for (const property of LOOK_PROPERTIES) {
+        current[property] = from[property] + (to[property] - from[property]) * progress;
+      }
+      entry.look = current;
+      paintFilters(entry, "full", current);
+    };
     const nodes = [entry.image, entry.mesh && entry.mesh.node].filter(Boolean);
-    if (time > 0) {
-      // A `filter` list only animates between two lists of the same length, so
-      // paint the previous look as a full four-function list first as the start,
-      // arm the transition (the flush reads layout to record that start), then
-      // write the new value — which the browser then interpolates over `time`.
-      // Without this the filter would be swapped in at once and only the wait
-      // the script asked for would elapse.
-      paintFilters(entry, "full", previous);
-      for (const node of nodes) {
-        writeTransition(node, { filter: time }, time);
-      }
-      paintFilters(entry, "full", entry.look);
-    } else {
-      // Instant: drop any filter transition left from an earlier timed call so
-      // this swap is not animated by a lingering one.
-      for (const node of nodes) {
-        writeTransition(node, { filter: 0 }, 0);
-      }
-      paintFilters(entry, "normal", entry.look);
+    // The old CSS-based path could leave a `filter` transition on the node.
+    // Every frame below is drawn explicitly, so none may linger.
+    for (const node of nodes) {
+      writeTransition(node, { filter: 0 }, 0);
     }
-    return settled(time);
+    if (!(time > 0)) {
+      entry.look = to;
+      paintFilters(entry, "normal", to);
+      return undefined;
+    }
+    draw(0);
+    return eased(time, draw, (ease) => {
+      if (ease) {
+        lookEases.set(entry, ease);
+      } else {
+        lookEases.delete(entry);
+      }
+    });
   };
 
   /**
@@ -5395,12 +6128,12 @@ export function createStage({
     if (entry.deformed) {
       return;
     }
-    entry.points = currentPoints(entry, perspectiveOn);
+    entry.points = currentPoints(entry, viewState());
     entry.frameSize = frameSizeOf(surface);
     // Paint the pieces before showing them. An untransformed mesh is eight
     // full-frame copies of the picture, so a mesh shown before `drawMesh` has
     // run would flash the unposed picture for one frame of a timed pull.
-    drawMesh(entry);
+    drawMesh(entry, viewState());
     entry.deformed = true;
     entry.image.style.display = "none";
     entry.mesh.node.style.display = "";
@@ -5434,7 +6167,7 @@ export function createStage({
       for (const name of handles) {
         entry.points[name] = mixed[name];
       }
-      drawMesh(entry);
+      drawMesh(entry, viewState());
       // 网格自己画完不会经过 `draw`，灯层的剪影也得跟着走这一帧。
       touchLights();
     });
@@ -5474,7 +6207,7 @@ export function createStage({
     // alone. Its plain image is out of the drawing, so none of what follows —
     // the two timelines, the box, the turn — has anything left to say.
     if (entry.deformed) {
-      drawMesh(entry, perspectiveOn);
+      drawMesh(entry, viewState());
       return;
     }
 
@@ -5502,7 +6235,7 @@ export function createStage({
     // 转出 W 面（写过 `rotateH` / `rotateV`）之后，同一步换成整次透视投影：
     // 位置是中心的投影，`transform` 是一条 `matrix3d`。两种写法在三个角都
     // 为 0 时给出同一个结果，所以躺着不动的剧本一个像素都不变。
-    const at = frameOf(entry, frameUnits(), perspectiveOn);
+    const at = frameOf(entry, frameUnits(), viewState());
     image.style.left = `${at.left}%`;
     image.style.top = `${at.top}%`;
     // A box the writer has pulled on is written whole: the element's rectangle
@@ -5571,6 +6304,13 @@ export function createStage({
     entry.spinTo = 0;
     entry.spinStart = 0;
     entry.spinTime = 0;
+    // A timed `move` may still be feeding a drawn pose into the light layer.
+    // One journey at a time: stop it so neither the replay nor the walk below
+    // has its per-frame position overridden by the old move's remaining frames.
+    entry.moveEase?.cancel();
+    entry.moveEase = null;
+    entry.moveLive = null;
+
     // A replay travels to a node rather than performing, so the journey is
     // skipped and the entry simply arrives — position and key frames alike.
     // A fast-forward arrives the same way: the walk is a timed change like any
@@ -5973,6 +6713,18 @@ export function createStage({
     const dy = y - entry.y;
     const depth = z === undefined || z === null ? null : clampDepth(z);
     const sinks = depth !== null && depth !== entry.z;
+    // A move that interrupts another counts from where the picture is actually
+    // being drawn now, the way a light's timed change does. Then take over the
+    // live pose: a second move must not leave the first one's frames writing
+    // over it, nor an instant jump keep easing after it landed.
+    const from = {
+      x: entry.moveLive?.x ?? entry.x,
+      y: entry.moveLive?.y ?? entry.y,
+      z: entry.moveLive?.z ?? entry.z,
+    };
+    entry.moveEase?.cancel();
+    entry.moveEase = null;
+    entry.moveLive = null;
     entry.x = x;
     entry.y = y;
     if (depth !== null) {
@@ -5985,13 +6737,38 @@ export function createStage({
     }
     if (entry.deformed) {
       if (sinks) {
-        drawMesh(entry);
+        drawMesh(entry, viewState());
       }
       return reshape(entry, time, (start) => shiftedPoints(start, dx, dy));
     }
     draw(entry);
     if (sinks) {
       applySceneOrder();
+    }
+    // CSS slides the element, but the light layer and the backlit shade read
+    // numbers, not the element: walk a drawn pose frame by frame, the way
+    // `animateLight` walks a lamp's. Otherwise the shadow sits at the destination
+    // from the first frame — and disagrees with the export, which samples every
+    // frame at `t`. The step only touches lights, never `left`/`top`: those stay
+    // the one CSS transition owns.
+    if (time > 0) {
+      const step = (progress) => {
+        if (progress >= 1) {
+          entry.moveLive = null;
+          touchLights();
+          return;
+        }
+        entry.moveLive = {
+          x: from.x + (x - from.x) * progress,
+          y: from.y + (y - from.y) * progress,
+          z: depth === null ? from.z : from.z + (depth - from.z) * progress,
+        };
+        touchLights();
+      };
+      step(0);
+      eased(time, step, (ease) => {
+        entry.moveEase = ease;
+      });
     }
     return settled(time);
   };
@@ -6017,7 +6794,7 @@ export function createStage({
       for (const name of Object.keys(points)) {
         entry.points[name] = points[name];
       }
-      drawMesh(entry);
+      drawMesh(entry, viewState());
       touchLights();
     });
   };
@@ -6456,7 +7233,7 @@ export function createStage({
     // rectangle, turned to however the script has it facing. A character that
     // is never pulled on therefore keeps drawing exactly as it did, and the
     // first pull starts from where the picture already is.
-    entry.points = pointsOf(entry, perspectiveOn);
+    entry.points = pointsOf(entry, viewState());
     const held = entry.late;
     entry.late = [];
     entry.lateFailures = [];
@@ -6528,8 +7305,48 @@ export function createStage({
   /** Moves one point of the character's box by `dx`, `dy` from where it is. */
   const moveCharacterPoint = (slot, handle, dx, dy, time) =>
     withBox(slot, (entry) => {
-      const at = boxPoint(entry, handle, perspectiveOn);
+      const at = boxPoint(entry, handle, viewState());
       return boxSize(entry, handle, at.x + dx, at.y + dy, time);
+    });
+
+  /**
+   * 八点自由变换回到原来的框：`ch.flush(transform)`。
+   *
+   * 拉动一个点是单向的（见 `frame()` 的 `deformed`），所以复原也是两次动作：
+   * 先把八个点一起走回「按此刻的姿态算出来的那个框」，走完再把画法换回普通
+   * 图片 —— 网格只是被拉开的框，框回来了就没有它的事了。点走回的是此刻的框而
+   * 不是解码时的框：期间写下的 `scale` / `rotate` / `move` 原样留着。
+   *
+   * @param {string} slot The character's slot.
+   * @param {number} [time] 毫秒；省略是立刻。
+   * @returns {Promise<void> | undefined} 走完才 resolve；立刻复原时是 undefined。
+   */
+  const resetCharacterPoints = (slot, time) =>
+    withBox(slot, (entry) => {
+      if (!entry.deformed) {
+        return undefined;
+      }
+      const ms = duration("Character", time);
+      const target = pointsOf(entry, viewState());
+      const settle = () => {
+        entry.deformed = false;
+        // 八个点留在框上：下一次拉动从框开始，而不是从上一副被拉开的形状。
+        entry.points = target;
+        if (entry.mesh?.node) {
+          entry.mesh.node.style.display = "none";
+        }
+        if (entry.image) {
+          entry.image.style.display = "";
+        }
+        draw(entry);
+        touchLights();
+      };
+      const started = reshape(entry, ms, () => target);
+      if (!started) {
+        settle();
+        return undefined;
+      }
+      return started.then(settle);
     });
 
   /**
@@ -6705,6 +7522,21 @@ export function createStage({
    * because `draw` needs a real frame to flush and animate against.
    */
   const load = (entry, image, path, onFailure, onDecoded = () => {}, kind = "") => {
+    // `enable()` hands this back to the interpreter so a chain waits for the
+    // picture before the next link runs: `hide().enable().show(ms)` must start
+    // its fade on a visible, decoded bitmap, not on a hidden empty box. A load
+    // superseded by a newer one releases its waiter too, so no chain is parked.
+    entry.releaseLoad?.();
+    let ready;
+    const readyPromise = new Promise((resolve) => {
+      ready = resolve;
+      entry.releaseLoad = () => {
+        if (entry.releaseLoad === ready) {
+          entry.releaseLoad = undefined;
+        }
+        resolve();
+      };
+    });
     const ticket = (entry.ticket += 1);
     // A slot rebuilt on top of a playing GIF must not leave its timer painting
     // into the element this call is about to replace.
@@ -6730,6 +7562,7 @@ export function createStage({
      * `hidden` and never appear.
      */
     const reveal = () => {
+      // A superseded load is released by its replacement; nothing else to do.
       if (ticket !== entry.ticket) {
         return;
       }
@@ -6737,6 +7570,8 @@ export function createStage({
       if (entry.image && entry.image !== image) {
         entry.image.style.visibility = "";
       }
+      // The picture is on screen: release a chain waiting at `enable()`.
+      entry.releaseLoad?.();
     };
 
     Promise.resolve()
@@ -6782,6 +7617,7 @@ export function createStage({
             image.style.visibility = "";
             failLate(entry);
             onFailure();
+            entry.releaseLoad?.();
             onError(
               `无法解码图片：${path}${error?.message ? `（${error.message}）` : ""}`,
             );
@@ -6794,8 +7630,10 @@ export function createStage({
         }
         failLate(entry);
         onFailure();
+        entry.releaseLoad?.();
         onError(error instanceof Error ? error.message : String(error));
       });
+    return readyPromise;
   };
 
   /** Replaces the backdrop. A stage has at most one, so the new one wins. */
@@ -6836,7 +7674,7 @@ export function createStage({
       paintFilters(background);
     }
 
-    load(background, image, path, () => {
+    return load(background, image, path, () => {
       background.node.replaceChildren();
       background.image = null;
       background.path = null;
@@ -6929,7 +7767,7 @@ export function createStage({
       return;
     }
 
-    load(
+    return load(
       entry,
       image,
       path,
@@ -6952,6 +7790,30 @@ export function createStage({
       },
       "Character",
     );
+  };
+
+  /** `del ch`：把角色占的槽位、图片和灯层登记一并放下。 */
+  const releaseCharacter = (slot) => {
+    const entry = characters.get(slot);
+    if (!entry) return;
+    entry.ticket += 1;
+    stopGif(entry);
+    cancelPath(entry);
+    entry.image?.removeAttribute?.("src");
+    entry.image?.remove?.();
+    if (entry.mesh) {
+      for (const piece of entry.mesh.pieces) {
+        piece.image?.removeAttribute?.("src");
+        piece.image?.remove?.();
+      }
+    }
+    characters.delete(slot);
+    characterNames.delete(slot);
+    const at = characterOrder.indexOf(slot);
+    if (at >= 0) characterOrder.splice(at, 1);
+    restackCharacters();
+    touchLights();
+    refreshEmpty();
   };
 
   /**
@@ -7019,6 +7881,16 @@ export function createStage({
     paintText(entry);
     refreshEmpty();
     return entry;
+  };
+
+  /** `del` 一个文字对象：移除它的元素并放下槽位。 */
+  const releaseText = (slot) => {
+    const entry = texts.get(slot);
+    if (!entry) return;
+    entry.ticket += 1;
+    entry.image?.remove?.();
+    texts.delete(slot);
+    refreshEmpty();
   };
 
   /** Sets the face of the text in `slot`, Chinese and Western alike. */
@@ -7089,6 +7961,7 @@ export function createStage({
           color: entry.color,
           fontFamily: entry.fontFamily,
           fontWeight: entry.fontWeight,
+          look: entry.look ? { ...entry.look } : null,
         }
       : null;
   };
@@ -7173,7 +8046,7 @@ export function createStage({
       }
       if (entry.deformed) {
         entry.frameSize = size;
-        drawMesh(entry);
+        drawMesh(entry, viewState());
         return;
       }
       // 转出 W 面的对象写的是一条 `matrix3d`，其中的透视项按元素像素算，
@@ -7489,6 +8362,12 @@ export function createStage({
      * sound the way it builds a picture.
      */
     audio,
+    /**
+     * `# debug::com.audio.*Speed` 走到时改基础倍率：只影响之后启动的声音，
+     * 已在响的保持原速。舞台重建时随音频工厂一起复位。
+     */
+    setAudioSpeed: (value) => audio.setAudioSpeed(value),
+    setVoiceSpeed: (value) => audio.setVoiceSpeed(value),
     /** The built-in effects and the videos a script may build. */
     effect,
     video,
@@ -7537,6 +8416,16 @@ export function createStage({
     setPerspective,
     /** 当前是否开着空间透视。 */
     perspectiveIsOn: () => perspectiveOn,
+    /** `cam.enable()` 的演出端：换掉当前取景并重画。 */
+    activateCamera,
+    /** `cam.disable()` 的演出端：退回内置默认相机。 */
+    deactivateCamera,
+    /** Camera 数值补间的演出端。 */
+    animateCamera,
+    /** 当前取景的快照，供宿主与测试核对。 */
+    activeCameraState: () => ({ ...activeCamera }),
+    /** 当前激活的 Camera 对象；没有就是 null。 */
+    cameraIsActive: (camera) => Boolean(camera) && activeCameraObject === camera,
     /** `stage.guideline(value, interval)` 的演出端：默认关。 */
     setGuideline,
     /** 当前是否画着参考线。 */
@@ -7590,6 +8479,9 @@ export function createStage({
     reset,
     setBackground,
     setCharacter,
+    /** `del` 用的按槽位释放：图片与文字各自放下资源，不动别的槽位。 */
+    releaseCharacter,
+    releaseText,
     /**
      * 登记一个逐帧播放器，停掉同一槽位上的前一个。
      *
@@ -7662,6 +8554,8 @@ export function createStage({
     transformCharacter,
     transformCharacterPoint,
     moveCharacterPoint,
+    /** 八点自由变换回到框上，`ch.flush(transform)` 的演出端。 */
+    resetCharacterPoints,
     /** Fades the backdrop or a character, 0–1, over the milliseconds given. */
     setBackgroundAlpha,
     setCharacterAlpha,
@@ -7697,7 +8591,7 @@ export function createStage({
       if (!entry?.points) {
         return null;
       }
-      const points = currentPoints(entry, perspectiveOn);
+      const points = currentPoints(entry, viewState());
       return Object.fromEntries(
         Object.entries(points).map(([handle, at]) => [handle, { ...at }]),
       );

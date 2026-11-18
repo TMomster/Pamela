@@ -22,6 +22,13 @@ test("mpe：对象调用写成「目标 方法 参数」，台词免引号", () 
   assert.equal(line("小帕 说 你好，我是帕梅拉！"), '小帕.说("你好，我是帕梅拉！")');
 });
 
+test("mpe：清除把后面的词都读成效果名，不是一个接收者加方法", () => {
+  assert.equal(line("小帕 清除 缩放"), "小帕.清除(缩放)");
+  assert.equal(line("ch flush scale rotate 5000"), "ch.flush(scale, rotate, 5000)");
+  assert.equal(line("stage 清除 缩放 : ch bg"), "stage.清除(缩放 : ch, bg)");
+  assert.equal(line("清除 缩放 : ch bg"), "清除(缩放 : ch, bg)");
+});
+
 test("mpe：带引号的参数原样保留，可多于一个", () => {
   assert.equal(line('ch say "你好" "旁白"'), 'ch.say("你好", "旁白")');
   assert.equal(line("ch say “中文引号”"), "ch.say(“中文引号”)");
@@ -316,7 +323,7 @@ test("mpe：级联调用跑起来就是一路调下去", async () => {
   assert.deepEqual(calls, [["scale", 2, undefined], ["move", 0, -300], ["hide"]]);
 });
 
-test("mpe：cue 后面直接接一条级联调用，不必写花括号", () => {
+test("mpe：行内 cue 后面直接接一条级联调用，不需要 end", () => {
   assert.equal(
     line("cue 3000 ch scale 0.5 . move 0 -300"),
     "cue(3000) ch.scale(0.5).move(0, -300)",
@@ -326,15 +333,18 @@ test("mpe：cue 后面直接接一条级联调用，不必写花括号", () => {
     line("cue(3000) ch scale 0.5 . move 0 -300"),
     "cue(3000) ch.scale(0.5).move(0, -300)",
   );
+  // 伴随参数原样保留。
+  assert.equal(line("cue @ 5000 ch hide"), "cue @ 5000 ch.hide()");
   // 不带时间也是同一条 cue。
   assert.equal(line("cue ch hide"), "cue ch.hide()");
   assert.equal(line("cue -1 小帕 隐藏"), "cue(-1) 小帕.隐藏()");
   // 行尾的 wait 属于 cue，不会变成最后一个方法的参数。
-  assert.equal(line("cue 3000 ch hide wait"), "cue(3000) ch.hide() wait");
+  assert.equal(line("cue ch hide wait"), "cue ch.hide() wait");
+  assert.equal(line("cue ch hide wait 5000"), "cue ch.hide() wait 5000");
   // 缩进与行尾注释照旧。
   assert.equal(line("  cue 200 说 你好 // 旁白"), '  cue(200) 说("你好")');
-  // 块写法是完整语法，一行都不改写。
-  for (const source of ["cue {", "cue(3000) {", "cue 3000 {"]) {
+  // 独占一行的 cue 是块头，一行都不改写。
+  for (const source of ["cue", "cue(3000)", "cue @ 5000"]) {
     assert.equal(line(source), source);
   }
   // 以 cue 开头的名字仍是普通调用，不是关键字。
@@ -364,16 +374,16 @@ test("mpe：cue 简写行编译出来可执行", async () => {
   ]);
 });
 
-test("mpe：cue 块逐行编译，块后的 wait 5000 属于 cue", () => {
-  for (const closing of ["} wait 5000", "} wait(5000)"]) {
-    const source = ["cue {", "  ch scale 2.0 2000", "  ch blur 20 2000", closing].join("\n");
+test("mpe：cue 块逐行编译，end 后的 wait 5000 属于 cue", () => {
+  for (const closing of ["end wait 5000", "end wait(5000)"]) {
+    const source = ["cue", "  ch scale 2.0 2000", "  ch blur 20 2000", closing].join("\n");
     assert.equal(
       transpile(source),
-      ["cue {", "  ch.scale(2.0, 2000)", "  ch.blur(20, 2000)", closing].join("\n"),
+      ["cue", "  ch.scale(2.0, 2000)", "  ch.blur(20, 2000)", closing].join("\n"),
     );
   }
   // 带时间的块头也是完整语法，一行都不改写。
-  for (const head of ["cue {", "cue(5000) {", "cue 5000 {"]) {
+  for (const head of ["cue", "cue(5000)", "cue @ 5000"]) {
     assert.equal(line(head), head);
   }
   // 块内的行也可以是一条 cue 简写。
@@ -398,10 +408,10 @@ test("mpe：cue 块里的简写行同时开始，块按 wait 的时间放行", a
   };
   const source = [
     "ch = Character ch.png",
-    "cue {",
+    "cue",
     "  ch scale 2.0 2000",
     "  ch blur 20 2000",
-    "} wait 5000",
+    "end wait 5000",
     "ch say 结束",
   ].join("\n");
 

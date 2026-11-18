@@ -95,12 +95,14 @@ const DIGIT = /[0-9]/;
 const FORBIDDEN_PROPERTIES = new Set(["__proto__", "prototype", "constructor"]);
 
 /**
- * The two words a `cue` block is written with.
+ * The words a `cue` block is written with.
  *
- * `cue` opens it and `wait` closes it. They were the language's first
- * keywords, so neither is usable as a variable name.
+ * `cue` opens it and `end` closes it. `wait` after the `end` decides how long
+ * the script holds before the following statements. All three are reserved,
+ * so none is usable as a variable name.
  */
 const CUE = "cue";
+const END = "end";
 const WAIT = "wait";
 
 /** Opens a function declaration: `func name(a, b) { ... }`. */
@@ -120,6 +122,9 @@ const CHOICE = "choice";
 
 /** Plays another script file where the statement stands. */
 const INCLUDE = "include";
+
+/** Destroys one object and frees what it owns: `del ch`. */
+const DEL = "del";
 
 /** Switches the dialogue style the rest of the run performs in. */
 const USE = "use";
@@ -169,21 +174,72 @@ const NULL = "null";
  *
  * 一行以 `#` 开头的文字是一条调试命令，而不是注释：`#` 后面跟固定的 `debug::`
  * 前缀，然后是命令集、对象与动作，写成三段点分的名字。`com` 是命令集（command）
- * 的意思，所以 `debug::com.player.skip` 读作「调试 → com 命令集 → 播放器 →
- * 跳到此处」。
+ * 的意思，所以 `debug::com.player.start` 读作「调试 → com 命令集 → 播放器 →
+ * 从此处开始」。
  *
  * 命令只对宿主有用：解释器不改变画面，只把「走到这里了」报给宿主。播放器据此
  * 决定从哪里开始常速演出，导出据此决定导哪一段。认不出来的名字在解析期就报错，
  * 因为写错的调试命令静默通过时，作者会以为标记生效了。
  */
 export const DEBUG_COMMANDS = new Map([
-  ["debug::com.player.skip", { target: "player", command: "skip" }],
+  ["debug::com.player.start", { target: "player", command: "start" }],
   ["debug::com.export.start", { target: "export", command: "start" }],
   ["debug::com.export.break", { target: "export", command: "break" }],
+  // 这两条不是位置标记，而是开演前就要生效的开关：enable 是否顺带让对象入场，
+  // 以及播放器是否在演出前先裁剪失活对象之后的代码。
+  ["debug::com.enable.autoShow=1", { target: "enable", command: "autoShow", setting: true, autoShow: true }],
+  ["debug::com.enable.autoShow=0", { target: "enable", command: "autoShow", setting: true, autoShow: false }],
+  ["debug::com.player.autoModify", { target: "player", command: "autoModify", setting: true }],
 ]);
 
+/**
+ * 带数值参数的调试命令：`# debug::com.audio.voiceSpeed=1.5`。
+ *
+ * 速度值由作者写，名字无法事先穷举，只能按前缀认。命中后由 `debugCommandInfo`
+ * 解析出 `value`；上下限与 `audio.js` / `export-audio.js` 的 `clipRate` 一致。
+ */
+const DEBUG_RATE_COMMANDS = new Map([
+  ["debug::com.audio.voiceSpeed", { target: "audio", command: "voiceSpeed" }],
+  ["debug::com.audio.audioSpeed", { target: "audio", command: "audioSpeed" }],
+]);
+
+/** 速度类调试命令的上下限：1 为原速。 */
+const DEBUG_RATE_MIN = 0.1;
+const DEBUG_RATE_MAX = 10;
+
+/**
+ * 把一行调试命令的文字解析成元数据，精确命令与带数值的命令都走这里。
+ *
+ * @param {string} text `debug::` 开头的整段文字。
+ * @returns {object|null} 命中时带 `target` / `command` 及可能的 `value`；
+ *   数值非法时返回带 `badRate` 的对象，交给解析期报错而不是认作未知命令。
+ */
+function debugCommandInfo(text) {
+  const exact = DEBUG_COMMANDS.get(text);
+  if (exact) {
+    return exact;
+  }
+  const equal = text.indexOf("=");
+  if (equal < 0) {
+    return null;
+  }
+  const spec = DEBUG_RATE_COMMANDS.get(text.slice(0, equal));
+  if (!spec) {
+    return null;
+  }
+  const raw = text.slice(equal + 1).trim();
+  const amount = Number(raw);
+  if (!raw || !Number.isFinite(amount) || amount < DEBUG_RATE_MIN || amount > DEBUG_RATE_MAX) {
+    return { badRate: true };
+  }
+  return { ...spec, value: amount };
+}
+
 /** 所有调试命令的写法，用于报错时列出可用的名字。 */
-const DEBUG_NAMES = [...DEBUG_COMMANDS.keys()].map((name) => `# ${name}`).join("、");
+const DEBUG_NAMES = [
+  ...[...DEBUG_COMMANDS.keys()].map((name) => `# ${name}`),
+  ...[...DEBUG_RATE_COMMANDS.keys()].map((name) => `# ${name}=0.1~10`),
+].join("、");
 
 /**
  * 扫出脚本文本里的调试命令，按行号报告。
@@ -195,7 +251,7 @@ const DEBUG_NAMES = [...DEBUG_COMMANDS.keys()].map((name) => `# ${name}`).join("
  *
  * @param {string} source
  * @returns {Array<{ text: string, line: number, target?: string, command?: string,
- *   known: boolean }>}
+ *   value?: number, known: boolean }>}
  */
 export function scanDebugCommands(source) {
   const found = [];
@@ -207,7 +263,8 @@ export function scanDebugCommands(source) {
         return;
       }
       const text = trimmed.slice(1).trim();
-      const known = DEBUG_COMMANDS.get(text);
+      const info = debugCommandInfo(text);
+      const known = info && !info.badRate ? info : null;
       found.push({ text, line: index + 1, ...(known ?? {}), known: Boolean(known) });
     });
   return found;
@@ -223,6 +280,7 @@ export function scanDebugCommands(source) {
  */
 export const KEYWORDS = new Set([
   CUE,
+  END,
   WAIT,
   FUNC,
   IF,
@@ -230,6 +288,7 @@ export const KEYWORDS = new Set([
   RETURN,
   CHOICE,
   INCLUDE,
+  DEL,
   USE,
   WHILE,
   BREAK,
@@ -254,6 +313,13 @@ export const KEYWORDS = new Set([
  * member access only ever names a string.
  */
 const SCRIPT_FUNCTION = Symbol("pamela.function");
+
+/**
+ * The hook `del ch` calls on an object. A symbol keeps it out of a script's
+ * reach: a member read only ever names a string, so no line can call it by
+ * accident while every stage object can implement it.
+ */
+export const OBJECT_DESTROY = Symbol("pamela.destroy");
 
 /**
  * Marks a value that is a Pamela list (`[a, b, c]`). A host object is a plain
@@ -282,6 +348,44 @@ const DICT = Symbol("pamela.dict");
  * by hand would have run in, so a group cannot change what a scene does.
  */
 const ARRAY = Symbol("pamela.array");
+
+/**
+ * Marks a value that is the *name* of a builtin method rather than a string.
+ *
+ * `flush(scale)` writes a method's own name, unquoted: the word is not a
+ * variable and not text, it is the effect to undo. The interpreter reads an
+ * unbound builtin name in that one argument position as one of these, so
+ * `flush("scale")` — a string, and so a value a script could compute — is
+ * refused by the host, and `x = scale` stays the undefined name it always was.
+ *
+ * The two fields are kept because an error has to quote the word as written:
+ * a script that says `清除(缩放)` should not be told about `scale`.
+ */
+const METHOD_NAME = Symbol("pamela.methodName");
+
+/**
+ * A method name written in a `flush` call, as the value the host reads.
+ *
+ * @param {string} english The name the runtime answers to.
+ * @param {string} [written] The word the script wrote, for error messages.
+ * @returns {object}
+ */
+export function methodName(english, written = english) {
+  return { [METHOD_NAME]: { english, written } };
+}
+
+/**
+ * The method name a value carries, or `null` when it is some other value.
+ *
+ * @param {unknown} value
+ * @returns {{ english: string, written: string } | null}
+ */
+export function methodNameOf(value) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  return value[METHOD_NAME] ?? null;
+}
 
 /**
  * The methods a group answers to.
@@ -483,7 +587,7 @@ const MAX_STATEMENTS = 100_000;
  * block comment that covers whatever it spans, newlines included.
  *
  * `#` is no longer a comment: a line that starts with one is a debug command
- * (`# debug::com.player.skip`), carried as a single token so the parser can
+ * (`# debug::com.player.start`), carried as a single token so the parser can
  * check the name and the interpreter can report it to the host.
  *
  * @param {string} source
@@ -845,7 +949,11 @@ export function parse(tokens) {
     if (token.type === "ident" && token.value === CUE) {
       return parseCue();
     }
-    // `wait` closes a `cue` block, and on a line of its own it is a pause:
+    if (token.type === "ident" && token.value === END) {
+      return fail(`${END} 只能用来结束 ${CUE} 语句块`, token);
+    }
+    // `wait` after a cue's `end` decides when the script goes on; on a line of
+    // its own it is a pause:
     // `wait 500` holds the script for half a second. Both readings are the same
     // word doing the same thing — waiting — and which one is meant is decided
     // by where it stands: before the end of the line it opens a statement of
@@ -867,6 +975,14 @@ export function parse(tokens) {
     }
     if (token.type === "ident" && token.value === INCLUDE) {
       return parseInclude();
+    }
+    if (token.type === "ident" && token.value === DEL) {
+      const mark = advance();
+      if (peek().type !== "ident" || KEYWORDS.has(peek().value)) {
+        return fail("del 后面需要一个变量名", mark);
+      }
+      const target = advance();
+      return { node: { type: "del", name: target.value, line: mark.line } };
     }
     if (token.type === "ident" && token.value === USE) {
       return parseUse();
@@ -941,7 +1057,7 @@ export function parse(tokens) {
   }
 
   /**
-   * 一条调试命令：`# debug::com.player.skip`。
+   * 一条调试命令：`# debug::com.player.start`。
    *
    * 词法器已经把整行收成一个记号，这里只认名字：名字不在表里就报错，并列出
    * 可用的几个。写错的调试命令若静默通过，作者会以为自己标好了位置，实际
@@ -952,15 +1068,20 @@ export function parse(tokens) {
    */
   function parseDebug(token) {
     const text = String(token.value ?? "").trim();
-    const known = DEBUG_COMMANDS.get(text);
-    if (!known) {
-      return fail(`未知的调试命令：# ${text || "（空）"}。可用的是 ${DEBUG_NAMES}`, token);
+    const known = debugCommandInfo(text);
+    if (!known || known.badRate) {
+      const reason = known?.badRate
+        ? `速度值需要在 ${DEBUG_RATE_MIN} 到 ${DEBUG_RATE_MAX} 之间`
+        : "未知的调试命令";
+      return fail(`${reason}：# ${text || "（空）"}。可用的是 ${DEBUG_NAMES}`, token);
     }
     return {
       node: {
         type: "debug",
         target: known.target,
         command: known.command,
+        ...(known.setting ? { setting: true, autoShow: known.autoShow } : {}),
+        ...(known.value !== undefined ? { value: known.value } : {}),
         text,
         line: token.line,
       },
@@ -1046,9 +1167,9 @@ export function parse(tokens) {
    * The number is read at parse time because a pause is a length, not a value:
    * nothing in the language can compute one, and letting it be an expression
    * would invite `wait x` where a script meant `wait 500`. It may be written in
-   * brackets too — `wait(500)` — since the word also closes a `cue` block, and
+   * brackets too — `wait(500)` — since the word also follows a cue's `end`, and
    * the two spellings mean the same thing wherever it appears. A `wait` with no
-   * number is the block's end written on the wrong line, and says so.
+   * number on a line of its own has nothing to wait for, and says so.
    */
   function parseWait() {
     const token = advance();
@@ -1057,7 +1178,7 @@ export function parse(tokens) {
       return ms;
     }
     if (ms.none) {
-      return fail(`${WAIT} 要么跟在语句块的 } 后面，要么写成 ${WAIT} 毫秒数`, token);
+      return fail(`${WAIT} 要么跟在 ${CUE} 的 ${END} 或行内语句后面，要么写成 ${WAIT} 毫秒数`, token);
     }
     return { node: { type: "wait", ms: ms.value, line: token.line } };
   }
@@ -1065,9 +1186,9 @@ export function parse(tokens) {
   /**
    * The milliseconds a `wait` names: `wait 500`, `wait(500)`.
    *
-   * Answers `{ value }`, `{ none: true }` when the word names no time — the
-   * `wait` that only closes a block — or `{ error }` when a bracketed time is
-   * malformed. A number and nothing else: a pause is a length, not a computed
+   * Answers `{ value }`, `{ none: true }` when the word names no time — a bare
+   * `wait` after a cue, meaning `wait -1` — or `{ error }` when a bracketed time
+   * is malformed. A number and nothing else: a pause is a length, not a computed
    * value, exactly as it is on a line of its own.
    */
   function waitTime(token) {
@@ -1090,35 +1211,27 @@ export function parse(tokens) {
   }
 
   /**
-   * Parses `cue { ... }`, optionally closed off with `wait`.
+   * Parses a cue block (`cue` … `end`) or an inline cue statement.
    *
-   * The block is only about the moment its statements start: they all begin
-   * at once, and the calls inside them do too. How long the script is held
-   * before the statements after the block begin is the block's time, written
-   * either as the keyword's argument (`cue(3000) { … }`) or as the closing
-   * `wait` (`} wait 3000`, `} wait(3000)`). The two are the same thing, and a
-   * `wait` that names a time wins when both are written. A `wait` with no
-   * number is the old spelling of "hold until the block is over"; with neither
-   * time nor `wait` the block starts its group and moves on at once.
+   * A cue starts a group whose statements all begin at once. When `cue` owns
+   * its line, everything up to `end` is that group; `end` only closes the
+   * boundary, it never waits. When `cue` shares its line with a statement,
+   * that single statement is the whole group and no `end` is written.
    *
-   * `wait` has to sit on the same line as the closing brace. On a line of its
-   * own it would read as a statement of its own, since a newline separates
-   * statements everywhere else in the language.
+   * The time the script holds before continuing may be written in exactly one
+   * of three ways: `cue(3000)` / `cue 3000`, `cue @ 3000`, or `wait 3000`
+   * after `end` (or after the inline statement). A bare `wait` means `wait -1`:
+   * hold until the group is over. Mixing two of the three is an error — there
+   * is no precedence, the script must say the time once and only once. `0`
+   * means no hold, just as omitting the time does.
    *
-   * A `cue` may also carry a single statement instead of a block:
-   * `cue(3000) ch.scale(0.5).move(0, -300)`. One statement is where a chain
-   * lives, and a chain inside a cue starts together — which is the one way to
-   * make `ch.scale(2, 2000).blur(20, 2000)` take two seconds instead of four.
-   * The time is written either in parentheses or straight after the keyword
-   * (`cue 3000 …`), the way the shorthand dialect writes it.
+   * `end` and its `wait` have to sit on the same line. On a line of its own a
+   * `wait` is a pause statement, since a newline separates statements.
    */
   function parseCue() {
     const token = advance();
-    // Optional time argument: `cue(3000) { ... }`. A number (may be negative, so
-    // -1 is allowed) or any expression; the meaning is read off the value at run
-    // time — a positive time holds exactly that long, -1 waits for everything,
-    // 0 / none starts the group and moves on at once.
     let time = null;
+    let timeFrom = null;
     if (at("punct", "(")) {
       advance();
       const expr = parseExpression();
@@ -1130,66 +1243,113 @@ export function parse(tokens) {
       }
       advance();
       time = expr.node;
+      timeFrom = `${CUE}(time)`;
+    } else if (at("punct", "@")) {
+      advance();
+      const expr = parseExpression();
+      if (expr.error) {
+        return expr;
+      }
+      time = expr.node;
+      timeFrom = `${CUE} @ time`;
     } else if (at("number") || (at("punct", "-") && peek(1).type === "number")) {
-      // `cue 3000 …`: the same time without the parentheses, as the shorthand
-      // dialect writes it. Only a number is read this way — a name here would
-      // make `cue ch.hide()` impossible to tell from a cue waiting on `ch`.
+      // Only a number is read here: a name would make `cue ch.hide()` impossible
+      // to tell from a cue waiting on `ch`.
       const sign = at("punct", "-") ? advance() : null;
       const ms = advance();
       const literal = { type: "literal", value: ms.value, line: ms.line };
       time = sign
         ? { type: "unary", op: sign.value, operand: literal, line: sign.line }
         : literal;
+      timeFrom = `${CUE} time`;
     }
 
-    // Without a brace the rest of the line is the one statement the cue starts.
-    if (!at("punct", "{")) {
-      if (at("newline") || at("punct", ";") || at("eof")) {
-        return fail(`${CUE} 后面需要一条语句或一个语句块`, token);
-      }
+    if (at("punct", "{")) {
+      return fail(`${CUE} 不再使用花括号：让 ${CUE} 独占一行，并用 ${END} 结束`, token);
+    }
+
+    let statements;
+    const inline = !at("newline") && !at("punct", ";") && !at("eof");
+    if (inline) {
       const single = parseStatement();
       if (single.error) {
         return single;
       }
-      const { wait, waitMs, error } = parseCueWait(token);
-      if (error) {
-        return { error };
+      statements = [single.node];
+    } else {
+      const block = parseCueBlock(token);
+      if (block.error) {
+        return block;
       }
-      return {
-        node: {
-          type: "cue",
-          statements: [single.node],
-          wait,
-          waitMs,
-          time,
-          line: token.line,
-        },
-      };
-    }
-    advance();
-
-    const block = parseBlock();
-    if (block.error) {
-      return block;
+      statements = block.statements;
     }
 
-    const { wait, waitMs, error } = parseCueWait(token);
-    if (error) {
-      return { error };
+    const closed = parseCueWait(token);
+    if (closed.error) {
+      return { error: closed.error };
+    }
+    if (time !== null && closed.wait) {
+      return fail(
+        `${CUE} 的等待时间只能写一次：${timeFrom} 不能与 ${inline ? "行尾 " : ""}${WAIT} 同时写`,
+        token,
+      );
     }
     return {
-      node: { type: "cue", statements: block.statements, wait, waitMs, time, line: token.line },
+      node: {
+        type: "cue",
+        statements,
+        wait: closed.wait,
+        waitMs: closed.waitMs,
+        time,
+        line: token.line,
+      },
     };
   }
 
   /**
-   * The `wait` written after a `cue`'s statement or block.
+   * Parses the statements between a `cue` and its `end`.
+   *
+   * The caller has already read `cue` and its optional time. Nested blocks —
+   * including nested cues — are handled by `parseStatement`, so the first
+   * `end` seen at this level closes this cue; there is no brace to count.
+   */
+  function parseCueBlock(token) {
+    const statements = [];
+    skipSeparators();
+    while (!at("ident", END)) {
+      if (at("eof")) {
+        return fail(`${CUE} 语句块缺少 ${END}`, token);
+      }
+      if (at("punct", "}")) {
+        return fail(`${CUE} 不再使用花括号，请用 ${END} 结束`, peek());
+      }
+      const statement = parseStatement();
+      if (statement.error) {
+        return statement;
+      }
+      statements.push(statement.node);
+      if (at("ident", END)) {
+        break;
+      }
+      if (at("eof")) {
+        return fail(`${CUE} 语句块缺少 ${END}`, token);
+      }
+      if (at("newline") || at("punct", ";")) {
+        skipSeparators();
+      } else {
+        return fail("语句之间需要换行或分号");
+      }
+    }
+    advance();
+    return { statements };
+  }
+
+  /**
+   * The `wait` written after an inline cue or a cue's `end`.
    *
    * Answers the flag (`wait` is there at all), the time it names — `null` when
-   * it names none — and an error when a bracketed time is malformed. The flag
-   * and the time are both kept: a bare `wait` is the block's end and holds the
-   * script for the whole of it, while `wait 3000` holds it for three seconds
-   * whatever the block is doing.
+   * it names none — and an error when a bracketed time is malformed. A bare
+   * `wait` means `wait -1`: hold until the group is over.
    */
   function parseCueWait(token) {
     if (!at("ident", WAIT)) {
@@ -1606,8 +1766,8 @@ export function parse(tokens) {
    * Parses the statements between braces, closing one included.
    *
    * The opening brace has already been read by the caller, which is the one
-   * that knows what the block belongs to. The body of a `func` and the body of
-   * a `cue` are the same thing to everything but the keyword in front of them.
+   * that knows what the block belongs to. A `cue` group is not read here: it
+   * runs from `cue` to `end` instead of between braces.
    */
   function parseBlock() {
     const statements = [];
@@ -2215,6 +2375,9 @@ const GLOBAL_ALIASES = [
   // 光源：打在画面上的灯，同样不读素材，第一个参数是颜色。
   ["光源", "Light"],
   ["灯", "Light"],
+  // 摄影机：只决定从哪取景，不读素材也不画在舞台上。
+  ["摄影机", "Camera"],
+  ["镜头", "Camera"],
   // A group of objects. It is a constructor like the three above — `对象组(ch, bg)`
   // — and the name says what it is for: a batch call written once.
   ["对象组", "Array"],
@@ -2267,6 +2430,9 @@ const METHOD_ALIASES = [
   ["缩放", "scale"],
   ["缩放到", "scaleTo"],
   ["透明度", "alpha"],
+  // 摄影机：视角与径向畸变，和移动/旋转共用同一套带 time 的写法。
+  ["视角", "fov"],
+  ["畸变", "distort"],
   // 调试：每个对象自己的三维坐标轴，默认隐藏。
   ["坐标轴", "crood"],
   // 光照：这个对象挡不挡灯。默认角色挡、其余类型透。
@@ -2281,6 +2447,9 @@ const METHOD_ALIASES = [
   ["描边抗锯齿", "eaa"],
   ["交叉溶解", "crossFade"],
   ["变换", "transform"],
+  // 清除：把某个方法造成的效果复原回去（`清除(缩放)` 把倍率归 1）。
+  ["清除", "flush"],
+  ["复原", "flush"],
   // 开场动画：舞台自己的一段约 3 秒黑幕，写在剧本哪一行就在哪一行播放。
   ["开场", "pamela"],
   // 逐帧图片组：一组图按每秒张数播放，组内可以增删改。
@@ -2437,8 +2606,9 @@ export const BUILTIN_METHODS = new Set(METHOD_ALIASES.map(([, english]) => engli
  * object the group holds.
  */
 export const BULK_METHODS = Object.freeze({
-  // Presence and order: no parameter of their own.
-  enable: [],
+  // Presence and order; enable/disable take an optional fade time.
+  enable: ["time"],
+  disable: ["time"],
   front: [],
   back: [],
   // A fade may name its duration, and that is all it takes.
@@ -2454,6 +2624,8 @@ export const BULK_METHODS = Object.freeze({
   brightness: ["value", "time"],
   contrast: ["value", "time"],
   saturate: ["value", "time"],
+  // 清除：效果名可以写多个，时长为最后那个数（见 `REST_PARAMS`）。
+  flush: ["target", "time"],
   // 三个坐标与一个时长：`moveTo(x, y, z, time)`，z 可以省略。
   move: ["x", "y", "z", "time"],
   moveTo: ["x", "y", "z", "time"],
@@ -2607,6 +2779,12 @@ export const PARAM_SPECS = {
     "alpha", "spread", "range", "bloom", "soft",
     "z", "rotateH", "rotateV", "rotate", "width", "time",
   ],
+  // 摄影机不读素材：第一个参数就是机位的平轴坐标，其余是最常写的几项。
+  // 省略的槽位由 space.js 的 DEFAULT_CAMERA 补齐，保持老剧本逐像素不变。
+  Camera: [
+    "x", "y", "z", "fov", "k1", "k2",
+    "rotate", "rotateH", "rotateV", "time",
+  ],
 
   // --- globals ---
   say: ["text", "time", "audio"],
@@ -2629,11 +2807,14 @@ export const PARAM_SPECS = {
   "Stage.autoVoice": ["on"],
 
   // --- stage objects ---
-  enable: [],
-  disable: [],
+  enable: ["time"],
+  disable: ["time"],
   hide: ["time"],
   show: ["time"],
   alpha: ["value", "time"],
+  // 摄影机的视角（垂直 FOV，度）与径向畸变（k1/k2）。
+  fov: ["value", "time"],
+  distort: ["k1", "k2", "time"],
   // HVD 三轴：H 平轴（横向）、V 升轴（纵向）、D 推轴（深度）。参数名沿用
   // `dx/dy/dz` 与 `x/y/z`，`h/hTo/v/vTo/z/zTo` 是同一批调用更精确的拼写。
   move: ["dx", "dy", "dz", "time"],
@@ -2669,6 +2850,10 @@ export const PARAM_SPECS = {
   // 是两回事，所以两个名字分开，参数表里也各自独立。
   color: ["value", "time"],
   transform: [],
+  // 清除：把一种效果按它的方法名复原，例如 `flush(scale)`、`flush(rgb) @ 5000`。
+  // 名字不带引号，由解释器读成一个名字值（见 `methodName`）；可以写多个，
+  // 时长写在最后（见 `REST_PARAMS`）。不写名字表示这一类对象的全部效果。
+  flush: ["target", "time"],
   // 光照：每盏灯自己的数值，写法与滤镜一致——一个值，一个时长。
   intensity: ["value", "time"],
   spread: ["value", "time"],
@@ -2707,8 +2892,8 @@ export const PARAM_SPECS = {
   rotateVTo: ["degrees", "time"],
   // 两个角一起写：`方向(35, 60)` 是 H 面角与 V 面角。
   direction: ["rotateH", "rotateV", "time"],
-  // 环境亮度是舞台自己的一个数，没有对象。
-  ambient: ["value"],
+  // 环境亮度是舞台自己的一个数，没有对象；给时间就在这些毫秒里渐变过去。
+  ambient: ["value", "time"],
   // 舞台的两把空间尺子：透视开关，以及参考线的开关与间隔。
   "Stage.perspective": ["value"],
   perspective: ["value"],
@@ -2752,6 +2937,38 @@ export const PARAM_SPECS = {
   downleft: ["dx", "dy", "time"], downleftTo: ["x", "y", "time"],
   left: ["dx", "dy", "time"], leftTo: ["x", "y", "time"],
 };
+
+/**
+ * The parameters that take every remaining argument, and where their slot is.
+ *
+ * `flush(scale, rotate, 5000)` writes two effect names and a duration, but its
+ * signature can only say `target, time` — the names are not one value each, and
+ * a table that grew a row per name would have to guess how many to allow. This
+ * table says, for the two specs that need it, that `target` is such a slot: the
+ * duration written under `@` is then appended after the names rather than
+ * sitting in the first one's place, and a named `time = …` follows them too.
+ *
+ * Keyed by the spec array itself, so the published signatures stay exactly the
+ * two names a writer sees in the API reference — the marker lives here instead
+ * of in `PARAM_SPECS` (whose every entry doubles as a signature).
+ *
+ * @type {WeakMap<string[], string>}
+ */
+const REST_PARAMS = new WeakMap([
+  [PARAM_SPECS.flush, "target"],
+  [BULK_METHODS.flush, "target"],
+]);
+
+/**
+ * The index of the parameter that takes the rest of the arguments, or `-1`.
+ *
+ * @param {string[] | null} spec
+ * @returns {number}
+ */
+export function restParamAt(spec) {
+  const name = spec ? REST_PARAMS.get(spec) : undefined;
+  return name === undefined ? -1 : spec.indexOf(name);
+}
 
 /**
  * Every spelling of a parameter name, mapped to the names it may stand for.
@@ -2860,7 +3077,9 @@ export function paramSpecOf(receiver, method) {
   if (typeof kind === "string" && PARAM_SPECS[`${kind}.${method}`]) {
     return PARAM_SPECS[`${kind}.${method}`];
   }
-  return PARAM_SPECS[method] ?? null;
+  // 中文方法名（`模糊`）在宿主对象"自带"该成员时不会被翻译成英文，这里再按
+  // 英文别名兜底查一次，`@ 时长` 与命名参数才能落到同名英文方法的表上。
+  return PARAM_SPECS[method] ?? PARAM_SPECS[englishNameFor(method)] ?? null;
 }
 
 /**
@@ -2907,19 +3126,27 @@ export function applyNamedArgs(spec, args, named, callable, node) {
   }
   const out = args.slice();
   const taken = new Set();
+  // `flush(scale, rotate, time = 5000)`: the names are one slot that takes
+  // every remaining argument, so a duration given by name follows them instead
+  // of landing in the middle of the list.
+  const rest = restParamAt(spec);
   for (const entry of named) {
     const canonical = canonicalParam(entry.name, spec);
     if (!canonical) {
       return fail(`${callable} 没有参数名 ${entry.name}（可用：${spec.join("、")}）`);
     }
     const at = spec.indexOf(canonical);
-    if (at < args.length) {
-      return fail(`${callable} 的第 ${at + 1} 个参数已经按位置给出，不能再写 ${entry.name} = …`);
-    }
-    if (taken.has(at)) {
+    if (taken.has(canonical)) {
       return fail(`${callable} 的参数 ${entry.name} 重复给出`);
     }
-    taken.add(at);
+    taken.add(canonical);
+    if (at < args.length) {
+      if (rest >= 0 && at > rest) {
+        out.push(entry.value);
+        continue;
+      }
+      return fail(`${callable} 的第 ${at + 1} 个参数已经按位置给出，不能再写 ${entry.name} = …`);
+    }
     // Padding keeps the slots that were skipped empty rather than shifting the
     // ones after them: `f(y = 1)` must not become `f(1)`.
     while (out.length < at) out.push(undefined);
@@ -2948,6 +3175,16 @@ export function applyTimeArg(spec, args, ms, callable) {
   if (!spec || !spec.includes("time")) {
     return { error: { message: `${callable} 没有时间参数，不能用 @ 指定时长` } };
   }
+  // A slot that takes every remaining argument (`flush(target…)`) swallows the
+  // duration too: `flush(scale, rotate) @ 5000` is two names and then the time,
+  // not a name written where the time belongs.
+  const rest = restParamAt(spec);
+  if (rest >= 0) {
+    if (args.some((value) => typeof value === "number")) {
+      return { error: { message: `${callable} 使用了重复的时间参数` } };
+    }
+    return { args: [...args, ms] };
+  }
   const at = spec.indexOf("time");
   if (at < args.length) {
     return { error: { message: `${callable} 使用了重复的时间参数` } };
@@ -2956,6 +3193,162 @@ export function applyTimeArg(spec, args, ms, callable) {
   while (out.length < at) out.push(undefined);
   out[at] = ms;
   return { args: out };
+}
+
+/**
+ * 控制流语句：autoModify 只做线性顶层的分析，出现这些语句时保守地放弃优化。
+ * 分支、循环、函数、包含文件都会让「之后再没启用」无法静态断定。
+ */
+const MODIFY_BLOCKERS = new Set([
+  "if", "while", "for", "switch", "choice", "func", "include", "cue", "use", "jump",
+]);
+
+/** 能由剧本创建、因而能被自动释放的对象类型。 */
+const CREATED_TYPES = new Set([
+  "Background", "Character", "Text", "Audio", "Effect", "Video", "Light", "Camera",
+]);
+
+/** 一个赋值语句创建的是不是舞台对象。 */
+function createdTypeOf(node) {
+  if (!node) return null;
+  if (node.type === "chainTime") return createdTypeOf(node.body);
+  if (node.type !== "call" || node.callee?.type !== "identifier") return null;
+  const name = englishNameFor(node.callee.name);
+  return CREATED_TYPES.has(name) ? name : null;
+}
+
+/** 收录一条表达式里所有「变量.方法(…)」，包括调用链里层的调用。 */
+function collectCalls(node, out = []) {
+  if (!node || typeof node !== "object") return out;
+  if (node.type === "call") {
+    const callee = node.callee;
+    if (callee?.type === "member" && callee.object?.type === "identifier") {
+      out.push({ name: callee.object.name, method: englishNameFor(callee.name) });
+    }
+    if (callee?.type === "member") collectCalls(callee.object, out);
+    for (const argument of node.args ?? []) collectCalls(argument, out);
+    for (const named of node.named ?? []) collectCalls(named.value, out);
+    return out;
+  }
+  for (const [key, value] of Object.entries(node)) {
+    if (key === "type" || key === "line" || key === "column") continue;
+    if (Array.isArray(value)) {
+      for (const item of value) collectCalls(item, out);
+    } else if (value && typeof value === "object") {
+      collectCalls(value, out);
+    }
+  }
+  return out;
+}
+
+/** 一条语句对某几个变量做了哪些方法调用。 */
+function callsOf(statement) {
+  return statement.type === "expression" || statement.type === "assign"
+    ? collectCalls(statement.value)
+    : [];
+}
+
+/** AST 里有没有提到某个变量名（包括当参数传出去）。 */
+function mentions(node, name) {
+  if (!node || typeof node !== "object") return false;
+  if (node.type === "identifier" && node.name === name) return true;
+  for (const [key, value] of Object.entries(node)) {
+    if (key === "type" || key === "line" || key === "column") continue;
+    if (Array.isArray(value)) {
+      if (value.some((item) => mentions(item, name))) return true;
+    } else if (value && typeof value === "object" && mentions(value, name)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * autoModify 的预处理：找出对象的终结位置，给那条语句挂上释放标记，并把终结
+ * 之后只作用于这些对象的语句标成跳过。
+ *
+ * 这是标记而不是删改语句：下标不动，存档记下的节点位置才不会错位。分析只看
+ * 单个剧本的线性顶层；只要文件里有分支、循环、函数或 include，整份文件都不
+ * 参与优化，免得漏看某条路径上的重新启用。
+ *
+ * @param {{ statements: Array<object> }} program
+ * @returns {object} 同一个 program（语句被就地标注）
+ */
+export function optimizeProgram(program) {
+  const statements = program?.statements;
+  if (!Array.isArray(statements) || statements.some((s) => MODIFY_BLOCKERS.has(s.type))) {
+    return program;
+  }
+  const objects = new Map();
+  statements.forEach((statement, index) => {
+    if (statement.type === "assign" && !statement.op && createdTypeOf(statement.value)) {
+      objects.set(statement.name, { created: index, active: false, terminal: null });
+    }
+  });
+  if (!objects.size) return program;
+
+  statements.forEach((statement, index) => {
+    if (statement.type === "del" && objects.has(statement.name)) {
+      objects.get(statement.name).terminal = index;
+    }
+    for (const call of callsOf(statement)) {
+      const info = objects.get(call.name);
+      if (!info || index <= info.created) continue;
+      if (call.method === "enable") {
+        info.active = true;
+        info.terminal = null;
+      } else if (call.method === "disable") {
+        if (info.active) {
+          info.active = false;
+          info.terminal = index;
+        }
+      }
+    }
+  });
+
+  // 创建后从未启用的对象：创建那一行就是终结位置。
+  const terminal = new Map();
+  for (const [name, info] of objects) {
+    if (info.active || info.terminal === null) continue;
+    terminal.set(name, info.terminal ?? info.created);
+  }
+  if (!terminal.size) return program;
+
+  /** 一条语句是否只是某个（些）对象的方法调用，可以整行剪掉。 */
+  const skippable = (statement, index) => {
+    if (statement.releaseAfter?.length || statement.type !== "expression") return false;
+    let expression = statement.value;
+    if (expression?.type === "chainTime") expression = expression.body;
+    if (expression?.type !== "call" || expression.callee?.type !== "member") return false;
+    const calls = callsOf(statement);
+    return (
+      calls.length > 0 &&
+      calls.every((call) => terminal.has(call.name) && index > terminal.get(call.name))
+    );
+  };
+
+  // 终结之后若还有别的语句提到这个变量（比如 `say(ch.name())`），释放会让它
+  // 报「未定义」。宁可不优化这个对象，也不能把正常台词弄丢。
+  for (const [name, index] of [...terminal]) {
+    for (let at = index + 1; at < statements.length; at += 1) {
+      if (mentions(statements[at], name) && !skippable(statements[at], at)) {
+        terminal.delete(name);
+        break;
+      }
+    }
+  }
+  if (!terminal.size) return program;
+
+  for (const [name, index] of terminal) {
+    const statement = statements[index];
+    (statement.releaseAfter ??= []).push(name);
+  }
+  statements.forEach((statement, index) => {
+    if (skippable(statement, index)) {
+      statement.skip = true;
+    }
+  });
+  return program;
 }
 
 /**
@@ -2995,14 +3388,14 @@ export function applyTimeArg(spec, args, ms, callable) {
  *   becomes live there. See `setReplay` on the stage.
  * @param {(node: object) => void} [runtime.onLive]
  *   Called at the moment a replay reaches its node and turns live, and at the
- *   moment a `fastForward` run reaches its `# debug::com.player.skip` mark.
+ *   moment a `fastForward` run reaches its `# debug::com.player.start` mark.
  * @param {boolean} [runtime.fastForward]
  *   Starts the run travelling rather than performing: the statements before the
- *   `# debug::com.player.skip` mark are performed silently and instantly, and
+ *   `# debug::com.player.start` mark are performed silently and instantly, and
  *   the run turns live there (through `onLive`). A run that never reaches the
  *   mark answers `skipMissed`, because nothing was ever shown.
- * @param {(statement: { target: string, command: string, line: number },
- *   node: object) => ({ stop?: boolean } | void)} [runtime.onDebug]
+ * @param {(statement: { target: string, command: string, line: number,
+ *   value?: number }, node: object) => ({ stop?: boolean } | void)} [runtime.onDebug]
  *   Reports each `# debug::comm…` command the run walks over. Answering
  *   `{ stop: true }` ends the run at the mark.
  * @param {object} [runtime.context] The context the stage's globals are built
@@ -3026,6 +3419,10 @@ export function applyTimeArg(spec, args, ms, callable) {
 export async function interpret(program, runtime = {}) {
   const environment = new Map();
   const context = runtime.context ?? {};
+  // enable 是否顺带让对象入场；`# debug::com.enable.autoShow=0` 会关掉它。
+  if (runtime.autoShow !== undefined) {
+    context.autoShow = runtime.autoShow !== false;
+  }
   const constructors = runtime.constructors ?? {};
   /**
    * Factories a host still injects, adopted by the stage for this run.
@@ -3159,7 +3556,7 @@ export async function interpret(program, runtime = {}) {
   let replayed = 0;
 
   /**
-   * Whether the run is racing to a `# debug::com.player.skip` mark.
+   * Whether the run is racing to a `# debug::com.player.start` mark.
    *
    * A player that starts on a marked script travels the same way a replay does —
    * silently, with no line waiting for a click and no time passing — and only
@@ -3247,7 +3644,7 @@ export async function interpret(program, runtime = {}) {
   }
   // Still replaying means the run ended before it reached the saved node: the
   // host reports that rather than pretending the load worked. Still racing
-  // towards a `player.skip` mark means the same thing for a debug run — the
+  // towards a `player.start` mark means the same thing for a debug run — the
   // whole scene went by silently, so saying nothing would look like a stage
   // that simply refused to play.
   return { value, replayMissed: Boolean(replay), skipMissed: Boolean(fastForwarding) };
@@ -3281,8 +3678,25 @@ export async function interpret(program, runtime = {}) {
     // however this list ends — including on `return`, which leaves the list
     // early without ending the run.
     try {
+      // autoModify 的释放标记挂在前一条语句上；这里兑现它，位置仍在原来的语句
+      // 序列里，跳过的语句只占下标、不占演出。
+      let prior = null;
+      const releasePrior = () => {
+        if (!prior?.releaseAfter?.length) return null;
+        const marked = prior;
+        prior = null;
+        for (const name of marked.releaseAfter) {
+          const failure = destroyVariable(name, env, marked);
+          if (failure) return failure;
+        }
+        return null;
+      };
       for (let index = 0; index < statements.length; index += 1) {
         const statement = statements[index];
+        const released = releasePrior();
+        if (released) return released;
+        if (statement.skip) continue;
+        prior = statement;
         if (stopped()) {
           return { stopped: true };
         }
@@ -3319,11 +3733,11 @@ export async function interpret(program, runtime = {}) {
 
         // A debug command does nothing to the scene: it marks a place for the
         // host — where a fast-forward starts showing, where an export begins
-        // and ends. A run that set off early turns live at `player.skip`, since
+        // and ends. A run that set off early turns live at `player.start`, since
         // the picture standing on the stage there is the one to watch from.
         if (statement.type === "debug") {
           const outcome = onDebug?.(statement, at) ?? null;
-          if (fastForwarding && statement.target === "player" && statement.command === "skip") {
+          if (fastForwarding && statement.target === "player" && statement.command === "start") {
             fastForwarding = false;
             live = true;
             onLive?.(at);
@@ -3371,10 +3785,11 @@ export async function interpret(program, runtime = {}) {
             }
             held = Number(measured.value);
           }
-          // The closing `wait` outranks the time on the keyword: `cue(3000) { … }
-          // wait 5000` holds for five seconds. A `wait` that names no time is the
-          // older spelling of "hold until the block is over", and so is -1.
-          // A replay travels rather than performs and a preview has no
+          // The parser allows only one time specification, so there is no
+          // precedence to apply: `cue(3000)`, `cue @ 3000` and `end wait 3000`
+          // are three ways to say the same thing and never appear together.
+          // A `wait` that names no time is `wait -1`: hold until the group is
+          // over. A replay travels rather than performs and a preview has no
           // audience to pace, so neither waits for the group to finish.
           if (
             (statement.wait && held === null) ||
@@ -3805,6 +4220,14 @@ export async function interpret(program, runtime = {}) {
           continue;
         }
 
+        // `del ch` 直接销毁变量指向的对象并解除绑定：之后再提到它，报的是
+        // 「未定义的变量」，而不是对着已释放的壳子继续演出。
+        if (statement.type === "del") {
+          const failure = destroyVariable(statement.name, env, statement);
+          if (failure) return failure;
+          continue;
+        }
+
         // Objects a script builds may keep a stable identity: the name an
         // assignment binds to. Rebuilding the same variable therefore replaces
         // whatever the previous value put on the stage, rather than adding to it.
@@ -3848,6 +4271,8 @@ export async function interpret(program, runtime = {}) {
           await Promise.all(batch.splice(0, batch.length));
         }
       }
+      const finalRelease = releasePrior();
+      if (finalRelease) return finalRelease;
 
       return {};
     } finally {
@@ -3892,6 +4317,28 @@ export async function interpret(program, runtime = {}) {
         return { where: other, key: alias };
       }
     }
+    return null;
+  }
+
+  /**
+   * `del name` 与 autoModify 的自动释放共用的销毁入口：对象自己知道怎么放下
+   * 资源，解释器只负责解开变量名。变量解开后剧本再提到它，报的是「未定义」
+   * 而不是对着一个已经空掉的壳子继续画。
+   */
+  function destroyVariable(name, env, statement) {
+    const found = bindingOf(env, name);
+    if (!found) {
+      return errorAt(`未定义的变量：${name}`, statement);
+    }
+    const target = found.where.get(found.key);
+    if (!target || typeof target !== "object" || typeof target[OBJECT_DESTROY] !== "function") {
+      return errorAt(`del 只能用于可以销毁的对象：${name}`, statement);
+    }
+    const outcome = target[OBJECT_DESTROY]();
+    if (outcome?.error) {
+      return errorAt(outcome.error.message, statement);
+    }
+    found.where.delete(found.key);
     return null;
   }
 
@@ -4082,7 +4529,8 @@ export async function interpret(program, runtime = {}) {
         }
         sources.push(result.value);
       }
-      if (resolved.args.length > spec.length) {
+      // 收下全部剩余参数的格子（`stage.flush(scale, rotate : ch, bg)`）没有上限。
+      if (restParamAt(spec) < 0 && resolved.args.length > spec.length) {
         return errorAt(`stage.${english} 的冒号前面多给了参数`, node);
       }
     } else {
@@ -4453,10 +4901,45 @@ export async function interpret(program, runtime = {}) {
     await Promise.all(started);
   }
 
+  /** The name a callee is written with, or `null` for anything else. */
+  function calleeNameOf(callee) {
+    return callee && (callee.type === "identifier" || callee.type === "member")
+      ? callee.name
+      : null;
+  }
+
+  /**
+   * One argument of a `flush` call: a bare method name, or an ordinary value.
+   *
+   * The word is only a name when nothing the script bound claims it — a
+   * variable called `scale` still reads as that variable, and the host then
+   * refuses it with the message a wrong argument deserves. A name that is not
+   * a builtin method is left to `evaluate`, so `flush(custom)` reports the
+   * undefined name instead of pretending to know it.
+   */
+  async function readEffectName(argument, env, rt) {
+    if (argument.type === "identifier" && !bindingOf(env, argument.name)) {
+      const english = englishNameFor(argument.name);
+      // `PARAM_SPECS` is where every method is described, Chinese spelling or
+      // not: `x` and `z` are methods with no Chinese alias, and `BUILTIN_METHODS`
+      // alone would not know them.
+      if (Object.hasOwn(PARAM_SPECS, english) || BUILTIN_METHODS.has(english)) {
+        return { value: methodName(english, argument.name) };
+      }
+    }
+    return evaluate(argument, env, rt);
+  }
+
   async function evaluateCall(node, env, rt) {
+    // `flush(scale)` names the effect to undo rather than computing a value, so
+    // its arguments are read for method names (see `readEffectName`). Every
+    // other call evaluates its arguments as the expressions they are.
+    const readsEffects = englishNameFor(calleeNameOf(node.callee) ?? "") === "flush";
     const args = [];
     for (const argument of node.args) {
-      const result = await evaluate(argument, env, rt);
+      const result = readsEffects
+        ? await readEffectName(argument, env, rt)
+        : await evaluate(argument, env, rt);
       if (aborted(result)) {
         return result;
       }
@@ -4911,6 +5394,10 @@ export async function run(source, runtime = {}) {
         return parsed;
       }
       program = parsed.program;
+      // autoModify 在开演之前跑：它只给语句打标记，不改变剧本文本或语句下标。
+      if (runtime.autoModify === true) {
+        optimizeProgram(program);
+      }
       if (currentFile) {
         scenes.set(currentFile, program);
       }

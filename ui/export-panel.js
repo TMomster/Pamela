@@ -566,7 +566,7 @@ export function createExportPanel({
       // 走的分支不同，剧本长度就不同：时长要按新策略重算。
       void runEstimate();
     });
-    form.append(row("选择支", dom.choice, "「按上次运行」沿用本轮演出的选择，没有记录时走第一项"));
+    form.append(row("选择支", dom.choice));
 
     dom.formError = element("p", "export-panel__error");
     dom.formError.hidden = true;
