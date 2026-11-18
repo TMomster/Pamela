@@ -19,7 +19,7 @@ notify_done.ps1
 /*.bat
 /scripts/*
 
-# 临时改名 / 诊断脚本（下划线前缀 = 一次性工具）
+# 临时改名 / 诊断脚本
 /t-*.txt
 /t-*.mjs
 /tools/_*
